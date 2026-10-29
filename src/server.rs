@@ -1,9 +1,3 @@
-//! gRPC `UI` service the daemon connects to.
-//!
-//! The daemon calls `AskRule` for every unknown connection; the handler hands
-//! the connection to the GTK thread and waits for the user's rule. Failures
-//! never reach the daemon as gRPC errors: they become a one-shot rule with the
-//! saved default action instead.
 
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
@@ -33,22 +27,14 @@ use crate::rule;
 use crate::settings::Settings;
 use crate::view;
 
-/// Which connecting processes may act as the daemon.
-///
-/// Only root by default. The daemon runs as root, and anything else that can
-/// reach the socket could spam prompts, feed fake rules or take over the
-/// notification stream. Unix sockets tell who is connecting; TCP cannot.
 pub struct PeerPolicy {
     allowed: Vec<u32>,
-    /// Peers already reported, so a flood of calls logs one line.
     reported: Mutex<HashSet<(u32, Option<i32>)>>,
 }
 
-/// The most distinct rejected peers that are logged.
 const MAX_REPORTED: usize = 64;
 
 impl PeerPolicy {
-    /// Root plus the `extra` user ids.
     pub fn new(extra: &[u32]) -> Self {
         let mut allowed = vec![0];
         allowed.extend_from_slice(extra);
@@ -58,14 +44,11 @@ impl PeerPolicy {
         }
     }
 
-    /// True when processes of user `uid` may act as the daemon.
     pub fn allows(&self, uid: u32) -> bool {
         self.allowed.contains(&uid)
     }
 
-    /// `Ok` when `request` may be served.
     pub fn check<T>(&self, request: &Request<T>) -> Result<(), Status> {
-        // No Unix credentials means a TCP connection, which can't be checked.
         let Some(info) = request.extensions().get::<UdsConnectInfo>() else {
             return Ok(());
         };
@@ -100,40 +83,30 @@ impl PeerPolicy {
     }
 }
 
-/// Error type used for startup failures.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-/// The daemon gives up on `AskRule` after 120 s; answer a bit earlier.
 const ASK_DEADLINE: Duration = Duration::from_secs(115);
-/// Identical connections asked within this window reuse the previous answer.
 const DEDUP_WINDOW: Duration = Duration::from_secs(2);
 
-/// A connection waiting for the user's decision on the GTK thread.
 pub struct PromptRequest {
     pub con: Connection,
     pub settings: Settings,
-    /// Saved rules that pin a different checksum than the running program.
     pub mismatch: Mismatch,
-    /// Changes daemon rules; `None` in demo mode, where there is no daemon.
-    pub updater: Option<Updater>,
-    /// Receives the rule; dropped by the server when the daemon stops waiting.
+    pub updater: Updater,
     pub reply: oneshot::Sender<Option<Rule>>,
 }
 
 type DedupKey = (u32, String, String, String, u32, String);
 
-/// Implementation of the `UI` gRPC service.
 pub struct Service {
     prompts: async_channel::Sender<PromptRequest>,
     settings_path: PathBuf,
     link: Arc<Link>,
-    /// Only one dialog at a time.
     turn: tokio::sync::Mutex<()>,
     recent: Mutex<HashMap<DedupKey, (Instant, Rule)>>,
 }
 
 impl Service {
-    /// Creates the service; prompts are sent through `prompts`.
     pub fn new(prompts: async_channel::Sender<PromptRequest>, settings_path: PathBuf) -> Self {
         Self {
             prompts,
@@ -144,7 +117,6 @@ impl Service {
         }
     }
 
-    /// What the daemon connection shares with the rest of the program.
     pub fn link(&self) -> Arc<Link> {
         self.link.clone()
     }
@@ -164,14 +136,13 @@ impl Service {
         }
     }
 
-    /// Asks the GTK thread; `None` when no rule came back in time.
     async fn prompt(&self, con: &Connection, settings: &Settings) -> Option<Rule> {
         let (reply, answer) = oneshot::channel();
         let request = PromptRequest {
             con: con.clone(),
             settings: settings.clone(),
             mismatch: checksum::find(&self.link.rules(), con, now_secs()),
-            updater: Some(Updater::new(self.link.clone())),
+            updater: Updater::new(self.link.clone()),
             reply,
         };
         self.prompts.send(request).await.ok()?;
@@ -259,7 +230,6 @@ impl Ui for Service {
         self.link.replace_rules(config.rules.clone());
         let settings = Settings::load(&self.settings_path);
         if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(&config.config) {
-            // The daemon applies this default while a UI is connected.
             json["DefaultAction"] = if settings.default_action == 1 {
                 "allow"
             } else {
@@ -277,9 +247,6 @@ impl Ui for Service {
         &self,
         request: Request<Streaming<NotificationReply>>,
     ) -> Result<Response<Self::NotificationsStream>, Status> {
-        // The daemon treats a closed stream as "UI gone", so keep it open for as
-        // long as the daemon keeps its side open. Rule changes are pushed on it
-        // and the daemon's replies are routed back to whoever asked.
         let mut replies = request.into_inner();
         let (outbox, stream) = mpsc::channel::<Result<Notification, Status>>(8);
         self.link.attach(outbox.clone());
@@ -303,7 +270,6 @@ impl Ui for Service {
     }
 }
 
-/// Where to listen.
 #[derive(Debug, PartialEq, Eq)]
 enum Listen {
     Unix(PathBuf),
@@ -326,7 +292,6 @@ fn parse_address(address: &str) -> Listen {
     }
 }
 
-/// Path of the unix socket `address` refers to, if it is a filesystem socket.
 pub fn socket_path(address: &str) -> Option<PathBuf> {
     match parse_address(address) {
         Listen::Unix(path) => Some(path),
@@ -334,7 +299,6 @@ pub fn socket_path(address: &str) -> Option<PathBuf> {
     }
 }
 
-/// Binds a filesystem socket, refusing to take over one that is in use.
 async fn bind_unix(path: &Path) -> Result<UnixListener, BoxError> {
     if UnixStream::connect(path).await.is_ok() {
         return Err(format!("another UI is already listening on {}", path.display()).into());
@@ -357,7 +321,6 @@ fn bind_abstract(name: &str) -> Result<UnixListener, BoxError> {
     Ok(UnixListener::from_std(listener)?)
 }
 
-/// Resolves on SIGINT or SIGTERM.
 pub async fn shutdown_signal() {
     use tokio::signal::unix::{SignalKind, signal};
     let Ok(mut term) = signal(SignalKind::terminate()) else {
@@ -369,9 +332,6 @@ pub async fn shutdown_signal() {
     }
 }
 
-/// Serves `service` on `address` until the process ends or an error occurs.
-///
-/// Only root and the `allowed_uids` may call it (see [`PeerPolicy`]).
 pub async fn serve(address: &str, service: Service, allowed_uids: &[u32]) -> Result<(), BoxError> {
     let policy = Arc::new(PeerPolicy::new(allowed_uids));
     let guarded = UiServer::with_interceptor(service, move |request: Request<()>| {
@@ -450,7 +410,6 @@ mod tests {
         }
     }
 
-    /// A service whose "GTK side" answers with `answer` (or drops the request).
     fn service(answer: Option<Rule>) -> Service {
         let (tx, rx) = async_channel::unbounded::<PromptRequest>();
         tokio::spawn(async move {
@@ -461,7 +420,6 @@ mod tests {
         Service::new(tx, PathBuf::from("/nonexistent/settings.conf"))
     }
 
-    /// Answers `request` with `answer`, or leaves it unanswered.
     fn reply_with(answer: Option<Rule>, request: PromptRequest) {
         if let Some(rule) = answer {
             let _ = request.reply.send(Some(rule));
@@ -482,8 +440,6 @@ mod tests {
         assert_eq!(reply.into_inner().name, "user-choice");
     }
 
-    /// Answers `count` requests with rules named `answer-1`, `answer-2`...
-    /// and returns how many it answered.
     async fn answer_numbered(rx: async_channel::Receiver<PromptRequest>, count: usize) -> usize {
         let mut n = 0;
         while n < count
@@ -519,7 +475,6 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        // Default settings: drop, sent to the daemon as "deny".
         assert_eq!(
             (reply.action.as_str(), reply.duration.as_str()),
             ("deny", "once")
@@ -554,9 +509,6 @@ mod tests {
         assert_eq!(ping.into_inner().id, 9);
     }
 
-    /// Real gRPC round trip: the daemon subscribes with a rule, opens the
-    /// notification stream, and confirms the `CHANGE_RULE` that the dialog's
-    /// "Update rule" button triggers.
     #[tokio::test]
     async fn checksum_update_reaches_the_daemon_over_grpc() {
         use crate::proto::ui_client::UiClient;
@@ -612,7 +564,6 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        // The mismatch is found from the rules the daemon announced.
         let mut con = con();
         con.process_checksums
             .insert("process.hash.md5".into(), "new".into());
@@ -643,7 +594,6 @@ mod tests {
         assert!(crate::checksum::find(&link.rules(), &con, now_secs()).is_empty());
     }
 
-    /// Builds one HTTP/2 frame.
     fn frame(kind: u8, flags: u8, stream: u32, payload: &[u8]) -> Vec<u8> {
         let len = u32::try_from(payload.len()).unwrap();
         let mut out = len.to_be_bytes()[1..].to_vec();
@@ -653,7 +603,6 @@ mod tests {
         out
     }
 
-    /// An HPACK "literal without indexing" header with a new name.
     fn literal(name: &str, value: &str) -> Vec<u8> {
         let mut out = vec![0x00, u8::try_from(name.len()).unwrap()];
         out.extend(name.as_bytes());
@@ -662,10 +611,6 @@ mod tests {
         out
     }
 
-    /// opensnitchd uses grpc-go 1.32, which sends the unix socket path as the
-    /// HTTP/2 `:authority`. That is not a valid authority and the HTTP/2 library
-    /// used to answer with PROTOCOL_ERROR, so no call from the daemon worked.
-    /// This sends the same request as raw bytes and expects a normal reply.
     #[tokio::test]
     async fn accepts_the_invalid_authority_sent_by_grpc_go() {
         use tokio::io::AsyncWriteExt;
@@ -681,7 +626,6 @@ mod tests {
                 .await;
         });
 
-        // HEADERS: POST, http, /protocol.UI/Ping, the bad authority, gRPC type.
         let mut headers = vec![0x83, 0x86];
         headers.extend([0x04, 17]);
         headers.extend(b"/protocol.UI/Ping");
@@ -689,7 +633,6 @@ mod tests {
         headers.extend(b"/tmp/osui.sock");
         headers.extend(literal("content-type", "application/grpc"));
         headers.extend(literal("te", "trailers"));
-        // DATA: a gRPC message holding PingRequest { id: 7 }.
         let message = [0, 0, 0, 0, 2, 0x08, 0x07];
 
         let mut request = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n".to_vec();
@@ -705,7 +648,6 @@ mod tests {
         assert_eq!(reply, [0, 0, 0, 0, 2, 0x08, 0x07], "PingReply with id 7");
     }
 
-    /// Raw HTTP/2 bytes for a `Ping` call with id 7.
     fn ping_request() -> Vec<u8> {
         let mut headers = vec![0x83, 0x86];
         headers.extend([0x04, 17]);
@@ -723,16 +665,12 @@ mod tests {
         request
     }
 
-    /// How the server treated a call.
     #[derive(Debug, PartialEq, Eq)]
     enum Served {
-        /// A reply with a body.
         Reply,
-        /// An error answered with headers only, as gRPC does.
         Refused,
     }
 
-    /// Reads one HTTP/2 frame: `(type, flags, stream, payload)`.
     async fn read_frame<S>(conn: &mut S) -> Result<(u8, u8, u32, Vec<u8>), String>
     where
         S: tokio::io::AsyncRead + Unpin,
@@ -752,7 +690,6 @@ mod tests {
         Ok((head[3], head[4], stream, payload))
     }
 
-    /// What a frame means for the call on stream 1, once it settles the outcome.
     fn decide(
         kind: u8,
         flags: u8,
@@ -768,7 +705,6 @@ mod tests {
         }
     }
 
-    /// Reads frames until the call is answered, with the reply's body.
     async fn answer_of<S>(conn: &mut S) -> Result<(Served, Vec<u8>), String>
     where
         S: tokio::io::AsyncRead + Unpin,
@@ -790,7 +726,6 @@ mod tests {
         }
     }
 
-    /// Sends `Ping` over `conn` and tells whether it was served or refused.
     async fn ping_outcome<S>(conn: &mut S) -> Result<Served, String>
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -801,7 +736,6 @@ mod tests {
         answer_of(conn).await.map(|(served, _)| served)
     }
 
-    /// Serves on `address` in the background and connects to the unix `path`.
     async fn serve_and_connect(
         address: String,
         path: &std::path::Path,
@@ -830,8 +764,6 @@ mod tests {
         assert!(!PeerPolicy::new(&[]).allows(1000));
     }
 
-    /// The daemon is root. A process of the user who runs snitch can open the
-    /// socket (it is 0600) but must not be taken for the daemon.
     #[tokio::test]
     async fn a_non_root_process_is_refused_on_a_unix_socket() {
         check_unix_peer_policy().await;
@@ -843,7 +775,6 @@ mod tests {
         let own_uid = std::fs::metadata("/proc/self").unwrap().uid();
         for allowed in [vec![], vec![own_uid]] {
             let outcome = unix_ping_outcome(&allowed).await;
-            // Running the tests as root makes the first case legitimate.
             let expect = if allowed.is_empty() && own_uid != 0 {
                 Served::Refused
             } else {
@@ -857,8 +788,6 @@ mod tests {
         }
     }
 
-    /// Serves on a unix socket that lets `allowed` users act as the daemon, and
-    /// pings it from this process.
     async fn unix_ping_outcome(allowed: &[u32]) -> Result<Served, String> {
         let path = std::env::temp_dir().join(format!(
             "snitch-peer-{}-{}.sock",
@@ -873,7 +802,6 @@ mod tests {
         outcome
     }
 
-    /// Connects to the local `port`, waiting for the server to start listening.
     async fn connect_tcp(port: u16) -> tokio::net::TcpStream {
         for _ in 0..100 {
             if let Ok(conn) = tokio::net::TcpStream::connect(("127.0.0.1", port)).await {
@@ -884,7 +812,6 @@ mod tests {
         panic!("the server never started listening on port {port}");
     }
 
-    /// TCP carries no process identity, so it is still served (with a warning).
     #[tokio::test]
     async fn tcp_connections_are_still_served() {
         let port = {

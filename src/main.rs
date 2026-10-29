@@ -1,17 +1,15 @@
-//! snitch: a GTK4 prompt UI for the OpenSnitch daemon.
-//!
-//! Run without arguments to listen for the daemon (replacing `opensnitch-ui`),
-//! or with `--demo` to preview the dialog with a fake connection.
 
 mod bus;
 mod checksum;
-mod demo;
 mod dialog;
 mod link;
 mod model;
 mod rule;
+mod rule_edit;
+mod rules;
 mod server;
 mod settings;
+mod tray;
 mod view;
 
 use std::cell::RefCell;
@@ -27,8 +25,6 @@ use crate::link::Updater;
 use crate::server::{PromptRequest, Service};
 use crate::settings::{DEFAULT_ADDRESS, Settings};
 
-/// Types generated from `proto/ui.proto`.
-// Generated code, which is not ours to reshape for the complexity lints.
 #[allow(clippy::excessive_nesting, clippy::too_many_lines)]
 pub mod proto {
     tonic::include_proto!("protocol");
@@ -37,25 +33,20 @@ pub mod proto {
 const APP_ID: &str = "io.github.jeronimoalbi.Snitch";
 
 const USAGE: &str = "\
-snitch - GTK prompt for the OpenSnitch daemon
+opensnitch-ui-gtk4 - GTK4 UI for the OpenSnitch daemon
 
-USAGE: snitch [OPTIONS]
+USAGE: opensnitch-ui-gtk4 [OPTIONS]
 
 OPTIONS:
-    --demo                   Show the dialog with a fake connection and print the rule
-    --demo-scenario <NAME>   Demo scenario (implies --demo); default: curl
     --socket <ADDRESS>       Address to listen on (default: the Qt UI setting, else unix:///tmp/osui.sock)
     --settings <PATH>        Qt UI settings file (default: ~/.config/opensnitch/settings.conf)
     --allow-uid <UID>        Let this user, besides root, act as the daemon (repeatable)
     -h, --help               Show this help";
 
-/// Parsed command line.
 #[derive(Debug, Default)]
 struct Args {
-    demo: Option<String>,
     socket: Option<String>,
     settings: Option<PathBuf>,
-    /// User ids, besides root, that may act as the daemon.
     allow_uids: Vec<u32>,
 }
 
@@ -65,19 +56,6 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Option<Args>, St
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
         match arg.as_str() {
             "-h" | "--help" => return Ok(None),
-            "--demo" => {
-                out.demo.get_or_insert_with(|| "curl".to_string());
-            }
-            "--demo-scenario" => {
-                let name = value("--demo-scenario")?;
-                if demo::scenario(&name).is_none() {
-                    return Err(format!(
-                        "unknown scenario '{name}', try: {}",
-                        demo::SCENARIOS.join(", ")
-                    ));
-                }
-                out.demo = Some(name);
-            }
             "--socket" => out.socket = Some(value("--socket")?),
             "--settings" => out.settings = Some(PathBuf::from(value("--settings")?)),
             "--allow-uid" => {
@@ -104,7 +82,7 @@ fn main() -> glib::ExitCode {
             return glib::ExitCode::SUCCESS;
         }
         Err(err) => {
-            eprintln!("snitch: {err}\n\n{USAGE}");
+            eprintln!("opensnitch-ui-gtk4: {err}\n\n{USAGE}");
             return glib::ExitCode::FAILURE;
         }
     };
@@ -115,58 +93,24 @@ fn main() -> glib::ExitCode {
         .build();
     let args = Rc::new(args);
     app.connect_activate(move |app| {
-        // No window exists between prompts, so keep the application alive.
-        std::mem::forget(app.hold());
         let settings_path = args.settings.clone().unwrap_or_else(Settings::default_path);
-        match &args.demo {
-            Some(name) => run_demo(app, name, &settings_path),
-            None => run_daemon(
-                app,
-                args.socket.clone(),
-                settings_path,
-                args.allow_uids.clone(),
-            ),
-        }
+        std::mem::forget(app.hold());
+        run_daemon(
+            app,
+            args.socket.clone(),
+            settings_path,
+            args.allow_uids.clone(),
+        );
     });
     app.run_with_args::<String>(&[])
 }
 
-/// Shows one fake prompt, prints the resulting rule and exits.
-fn run_demo(app: &adw::Application, scenario: &str, settings_path: &Path) {
-    let Some(con) = demo::scenario(scenario) else {
-        return;
-    };
-    let settings = Settings::load(settings_path);
-    let app = app.clone();
-    let scenario = scenario.to_string();
-    glib::spawn_future_local(async move {
-        let checks = dialog::Checks {
-            mismatch: demo::mismatch(&scenario),
-            updater: None,
-        };
-        match dialog::prompt(&app, con, settings, checks, || false)
-            .await
-            .rule
-        {
-            Some(rule) => println!(
-                "{}",
-                serde_json::to_string_pretty(&rule::to_json(&rule)).unwrap_or_default()
-            ),
-            None => println!("no rule (empty selection)"),
-        }
-        app.quit();
-    });
-}
-
-/// Address to listen on: `--socket`, else the saved one, else the default.
 fn listen_address(socket: Option<String>, settings_path: &Path) -> String {
     socket
         .or_else(|| Settings::load(settings_path).server_address)
         .unwrap_or_else(|| DEFAULT_ADDRESS.to_string())
 }
 
-/// The directory of a unix socket address when it doesn't exist; snitch
-/// doesn't create it.
 fn missing_socket_dir(address: &str) -> Option<PathBuf> {
     let path = server::socket_path(address)?;
     let dir = path.parent()?;
@@ -186,7 +130,6 @@ fn start_runtime() -> tokio::runtime::Runtime {
     }
 }
 
-/// Serves the daemon on its own thread. The process ends when the server does.
 fn spawn_server(
     runtime: tokio::runtime::Runtime,
     address: String,
@@ -200,7 +143,6 @@ fn spawn_server(
                 () = server::shutdown_signal() => Ok(()),
             }
         });
-        // Don't leave a stale socket behind.
         if let Some(path) = server::socket_path(&address) {
             let _ = std::fs::remove_file(path);
         }
@@ -212,7 +154,6 @@ fn spawn_server(
     });
 }
 
-/// Starts the gRPC server and shows a dialog for every `AskRule` it receives.
 fn run_daemon(
     app: &adw::Application,
     socket: Option<String>,
@@ -234,9 +175,9 @@ fn run_daemon(
     let runtime = start_runtime();
     let updater = Updater::on(link, runtime.handle().clone());
     spawn_server(runtime, address, service, allow_uids);
+    tray::show(app, &updater);
     bus::serve(updater, bus_settings);
 
-    // Prompts are handled one after another on the GTK thread.
     let prompt_app = app.clone();
     glib::spawn_future_local(async move {
         while let Ok(request) = requests.recv().await {
@@ -245,7 +186,6 @@ fn run_daemon(
     });
 }
 
-/// Shows the dialog for one request and sends the answer back to the daemon.
 async fn handle_prompt(app: &adw::Application, request: PromptRequest) {
     let PromptRequest {
         con,
@@ -269,12 +209,10 @@ async fn handle_prompt(app: &adw::Application, request: PromptRequest) {
         glib::spawn_future_local(notify_desktop(title, body));
     }
     if let Some(reply) = reply.borrow_mut().take() {
-        // The daemon may have given up meanwhile; nothing to do then.
         let _ = reply.send(answer.rule);
     }
 }
 
-/// Logs what became of a prompt, when that is worth a line.
 fn log_answer(answer: &dialog::Answer, asked: &proto::Connection, abandoned: bool) {
     match (&answer.rule, answer.timed_out) {
         (Some(rule), true) => tracing::info!(
@@ -294,12 +232,6 @@ fn log_answer(answer: &dialog::Answer, asked: &proto::Connection, abandoned: boo
     }
 }
 
-/// Shows a desktop notification through `org.freedesktop.Notifications`, the
-/// interface GNOME, KDE, dunst and mako all implement. It needs no desktop
-/// file, unlike notifications sent through the application ID.
-///
-/// The server decides how long it stays up, and applies its own Do Not Disturb
-/// and notification settings, such as GNOME's.
 async fn notify_desktop(title: String, body: String) {
     use std::collections::HashMap;
 
@@ -307,7 +239,6 @@ async fn notify_desktop(title: String, body: String) {
 
     let urgency_normal: u8 = 1;
     let hints = HashMap::from([("urgency".to_string(), urgency_normal.to_variant())]);
-    // -1 means "the server's default expiry".
     let expire_ms: i32 = -1;
     let params = (
         "OpenSnitch",
@@ -350,15 +281,8 @@ mod tests {
 
     #[test]
     fn parses_flags() {
-        let a = parse(&["--demo-scenario", "dns", "--socket", "unix:/x"])
-            .unwrap()
-            .unwrap();
-        assert_eq!(a.demo.as_deref(), Some("dns"));
+        let a = parse(&["--socket", "unix:/x"]).unwrap().unwrap();
         assert_eq!(a.socket.as_deref(), Some("unix:/x"));
-        assert_eq!(
-            parse(&["--demo"]).unwrap().unwrap().demo.as_deref(),
-            Some("curl")
-        );
         assert!(parse(&["--help"]).unwrap().is_none());
     }
 
@@ -376,7 +300,6 @@ mod tests {
 
     #[test]
     fn rejects_bad_input() {
-        assert!(parse(&["--demo-scenario", "nope"]).is_err());
         assert!(parse(&["--socket"]).is_err());
         assert!(parse(&["--wat"]).is_err());
     }
@@ -401,7 +324,6 @@ mod tests {
         let missing = missing_socket_dir("unix:///nonexistent-dir/osui.sock");
         assert_eq!(missing, Some(PathBuf::from("/nonexistent-dir")));
         assert_eq!(missing_socket_dir("unix:///tmp/osui.sock"), None);
-        // A TCP address has no directory.
         assert_eq!(missing_socket_dir("127.0.0.1:50051"), None);
     }
 }

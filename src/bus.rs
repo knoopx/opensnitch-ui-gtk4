@@ -1,9 +1,3 @@
-//! The session D-Bus service other programs, such as the GNOME Shell
-//! extension, use to see and change whether the daemon intercepts connections.
-//!
-//! Turning interception on is open to every program in the session: it can
-//! only make the firewall stricter. Turning it off has to be authorised
-//! through polkit, because any program of the user could call this service.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -14,16 +8,11 @@ use gtk4::glib::{self, Variant};
 
 use crate::link::{DaemonState, Interception, Updater};
 
-/// Well-known name of the service.
 pub const NAME: &str = "io.github.jeronimoalbi.Snitch";
 const PATH: &str = "/io/github/jeronimoalbi/Snitch";
 const INTERFACE: &str = "io.github.jeronimoalbi.Snitch";
-/// Version of this interface. Bumped when something is removed or changed;
-/// adding methods and properties keeps it.
 const VERSION: u32 = 1;
-/// The polkit action that guards `Disable`; see `contrib/polkit`.
 const POLKIT_ACTION: &str = "io.github.jeronimoalbi.Snitch.disable-interception";
-/// Longest wait for a person to type their password.
 const POLKIT_TIMEOUT_MS: i32 = 120_000;
 
 const XML: &str = r#"
@@ -38,9 +27,6 @@ const XML: &str = r#"
   </interface>
 </node>"#;
 
-/// Starts offering the service on the session bus.
-/// `settings` is the OpenSnitch settings file snitch reads, offered as the
-/// `SettingsPath` property so other programs edit the same file.
 pub fn serve(updater: Updater, settings: PathBuf) {
     gio::bus_own_name(
         BusType::Session,
@@ -51,7 +37,9 @@ pub fn serve(updater: Updater, settings: PathBuf) {
             Err(err) => tracing::warn!("cannot offer {NAME} on D-Bus: {err}"),
         },
         |_, _| {},
-        |_, _| tracing::warn!("cannot own {NAME} on the session bus; is snitch already running?"),
+        |_, _| {
+            tracing::warn!("cannot own {NAME} on the session bus; is opensnitch-ui-gtk4 already running?")
+        },
     );
 }
 
@@ -89,7 +77,6 @@ fn register(
     Ok(())
 }
 
-/// Value of the property `name`.
 fn property(state: DaemonState, settings: &Path, name: &str) -> Variant {
     match name {
         "Version" => VERSION.to_variant(),
@@ -100,7 +87,6 @@ fn property(state: DaemonState, settings: &Path, name: &str) -> Variant {
     }
 }
 
-/// The properties that differ between two states, as `PropertiesChanged` wants.
 fn changed_properties(before: DaemonState, now: DaemonState) -> HashMap<&'static str, Variant> {
     let mut changed = HashMap::new();
     if before.interception != now.interception {
@@ -112,8 +98,6 @@ fn changed_properties(before: DaemonState, now: DaemonState) -> HashMap<&'static
     changed
 }
 
-/// Title and text of the notification a change of interception calls for:
-/// every pause and every resume is shown so it can't go unnoticed.
 fn notice(before: Interception, now: Interception) -> Option<(&'static str, &'static str)> {
     match (before, now) {
         (Interception::Off, Interception::Off) => None,
@@ -128,8 +112,6 @@ fn notice(before: Interception, now: Interception) -> Option<(&'static str, &'st
     }
 }
 
-/// Emits `PropertiesChanged` and, when the firewall was paused or resumed,
-/// shows a notification so that change can't go unnoticed.
 fn announce(connection: &DBusConnection, before: DaemonState, now: DaemonState) {
     let changed = changed_properties(before, now);
     if changed.is_empty() {
@@ -189,17 +171,13 @@ fn call(
     }
 }
 
-/// Asks polkit whether the process behind `sender` (a name on the session
-/// bus) may turn interception off, letting polkit prompt for a password.
 async fn authorize(session: &DBusConnection, sender: &str) -> Result<(), glib::Error> {
     let denied = |why: &str| glib::Error::new(gio::DBusError::AccessDenied, why);
 
-    // Polkit identifies a caller by process, not by the session bus name.
     let pid = caller_pid(session, sender).await?;
     let start_time = process_start_time(pid)
         .ok_or_else(|| denied("cannot identify the calling process for authorisation"))?;
 
-    // Only a checked "yes" counts; every failure below means no.
     let system = gio::bus_get_future(BusType::System).await.map_err(|err| {
         denied(&format!(
             "cannot reach the system bus to ask polkit: {}",
@@ -222,7 +200,6 @@ async fn authorize(session: &DBusConnection, sender: &str) -> Result<(), glib::E
     verdict(&reply)
 }
 
-/// Process id behind the session bus name `sender`.
 async fn caller_pid(session: &DBusConnection, sender: &str) -> Result<u32, glib::Error> {
     session
         .call_future(
@@ -241,8 +218,6 @@ async fn caller_pid(session: &DBusConnection, sender: &str) -> Result<u32, glib:
         .ok_or_else(|| failed("unexpected reply about the caller"))
 }
 
-/// Arguments of polkit's `CheckAuthorization` for the process `pid`: asks for
-/// `POLKIT_ACTION` and lets polkit interact with the user.
 fn polkit_arguments(pid: u32, start_time: u64) -> Variant {
     let subject = (
         "unix-process",
@@ -262,7 +237,6 @@ fn polkit_arguments(pid: u32, start_time: u64) -> Variant {
         .to_variant()
 }
 
-/// Reads polkit's answer: only a plain "authorized" is a yes.
 fn verdict(reply: &Variant) -> Result<(), glib::Error> {
     let denied = |why: &str| glib::Error::new(gio::DBusError::AccessDenied, why);
     let ((authorized, _challenge, _details),) = reply
@@ -275,19 +249,13 @@ fn verdict(reply: &Variant) -> Result<(), glib::Error> {
     }
 }
 
-/// When process `pid` started, in clock ticks since boot, as polkit wants it
-/// to tell a process from a later one that reuses its id.
 fn process_start_time(pid: u32) -> Option<u64> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     start_time_from_stat(&stat)
 }
 
-/// Field 22 of `/proc/<pid>/stat`. The second field is the program name in
-/// parentheses and may contain spaces and parentheses, so count from the last
-/// closing one.
 fn start_time_from_stat(stat: &str) -> Option<u64> {
     let after_name = &stat[stat.rfind(')')? + 1..];
-    // The first field after the name is field 3, the state.
     after_name.split_whitespace().nth(22 - 3)?.parse().ok()
 }
 

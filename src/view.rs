@@ -1,14 +1,9 @@
-//! Texts shown by the prompt, ported from the Qt UI
-//! (`dialogs/prompt/utils.py` and `details.py`). Kept free of GTK so it can
-//! be unit tested. Connection data is attacker-controlled, so everything that
-//! ends up in Pango markup goes through [`escape_markup`].
 
 use std::path::{Component, Path};
 
 use crate::model::command_line;
-use crate::proto::{Connection, Rule};
+use crate::proto::{Connection, Operator, Rule};
 
-/// Escapes `text` for use inside Pango markup.
 pub fn escape_markup(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -24,38 +19,22 @@ pub fn escape_markup(text: &str) -> String {
     out
 }
 
-/// Cuts `text` to `max` characters, appending `...` when shortened.
-pub fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() > max {
-        let head: String = text.chars().take(max).collect();
-        format!("{head}...")
-    } else {
-        text.to_string()
-    }
-}
-
-/// Drops control characters, which could spoof or break the labels.
 pub fn printable(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).collect()
 }
 
-/// Like [`printable`] but keeps line breaks.
 pub fn printable_lines(text: &str) -> String {
     text.chars()
         .filter(|c| *c == '\n' || !c.is_control())
         .collect()
 }
 
-/// Escapes the characters desktop notification bodies treat as markup.
 fn escape_body(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
 
-/// Title and body of the notification shown when a prompt timed out and the
-/// default rule was applied. The values come from the connection, so they are
-/// escaped for the notification body.
 pub fn missed_popup(con: &Connection, rule: &Rule) -> (String, String) {
     let verb = match rule.action.as_str() {
         "allow" => "allowed",
@@ -88,9 +67,6 @@ pub fn missed_popup(con: &Connection, rule: &Rule) -> (String, String) {
     (format!("Connection {verb}"), body)
 }
 
-/// One-line description of a connection for the logs: program, destination and
-/// protocol. Command-line arguments are left out on purpose, since they can
-/// hold secrets such as tokens in URLs.
 pub fn connection_summary(con: &Connection) -> String {
     let program = if con.process_path.is_empty() {
         "unknown program"
@@ -113,23 +89,14 @@ pub fn connection_summary(con: &Connection) -> String {
     )
 }
 
-/// Directories only root can write to. A program installed there is what its
-/// name says, which a program in a world-writable place like `/tmp` is not.
 const SYSTEM_DIRS: [&str; 7] = ["/usr", "/opt", "/bin", "/sbin", "/lib", "/lib64", "/snap"];
 
-/// True when `path` is absolute, has no `..`, and is inside a system directory.
 pub fn in_system_dir(path: &Path) -> bool {
     path.is_absolute()
         && !path.components().any(|c| matches!(c, Component::ParentDir))
         && SYSTEM_DIRS.iter().any(|dir| path.starts_with(dir))
 }
 
-/// Whether a desktop entry that launches `exec` is the program at `process`.
-///
-/// `Exec=` usually holds only a name (`firefox`), so a program is matched by
-/// name only when it sits in a system directory. A binary called `firefox` in
-/// `/tmp` or the home directory must not borrow Firefox's name, icon and
-/// description, which is what the user trusts when answering.
 pub fn same_program(exec: &Path, process: &Path) -> bool {
     exec == process
         || (in_system_dir(process)
@@ -137,7 +104,6 @@ pub fn same_program(exec: &Path, process: &Path) -> bool {
             && exec.file_name() == process.file_name())
 }
 
-/// Application name: desktop entry name, else the binary name.
 pub fn app_name(desktop_name: Option<&str>, con: &Connection) -> String {
     if let Some(name) = desktop_name.filter(|n| !n.is_empty()) {
         return name.to_string();
@@ -148,9 +114,8 @@ pub fn app_name(desktop_name: Option<&str>, con: &Connection) -> String {
     }
 }
 
-/// Sentence under the app name, as Pango markup.
 pub fn popup_message(app_name: &str, con: &Connection) -> String {
-    let name = format!("<b>{}</b>", escape_markup(&truncate(app_name, 64)));
+    let name = format!("<b>{}</b>", escape_markup(app_name));
     let target = escape_markup(if con.dst_host.is_empty() {
         &con.dst_ip
     } else {
@@ -164,7 +129,6 @@ pub fn popup_message(app_name: &str, con: &Connection) -> String {
             con.dst_port
         )
     } else if con.dst_port == 0 {
-        // ICMP and friends have no port.
         format!("is connecting to <b>{target}</b>, {proto}")
     } else {
         format!(
@@ -175,19 +139,18 @@ pub fn popup_message(app_name: &str, con: &Connection) -> String {
     format!("{name} {action}")
 }
 
-/// Binary path line, shown only when it isn't already part of the command line.
 pub fn path_label(app_name: &str, con: &Connection) -> Option<String> {
     let path = &con.process_path;
     if path.is_empty() {
         return None;
     }
     let text = if con.process_args.is_empty() {
-        truncate(path, 64)
+        path.clone()
     } else if !con.process_args.contains(path) {
         if app_name.to_lowercase() == command_line(con) {
-            truncate(path, 64)
+            path.clone()
         } else {
-            truncate(&format!("({path})"), 64)
+            format!("({path})")
         }
     } else {
         return None;
@@ -195,17 +158,15 @@ pub fn path_label(app_name: &str, con: &Connection) -> Option<String> {
     Some(printable(&text))
 }
 
-/// Command line, hidden when it is just the app name.
 pub fn args_label(app_name: &str, con: &Connection) -> Option<String> {
     let args = command_line(con);
     if app_name.to_lowercase() == args || args.is_empty() {
         None
     } else {
-        Some(printable(&truncate(&args, 256)))
+        Some(printable(&args))
     }
 }
 
-/// `1000 (name)` or just the id when the user is unknown.
 pub fn user_label(uid: u32, name: Option<&str>) -> String {
     match name {
         Some(name) => format!("{uid} ({name})"),
@@ -213,7 +174,6 @@ pub fn user_label(uid: u32, name: Option<&str>) -> String {
     }
 }
 
-/// Looks up the login name of `uid` in `/etc/passwd`.
 pub fn user_name(uid: u32) -> Option<String> {
     let passwd = std::fs::read_to_string("/etc/passwd").ok()?;
     passwd.lines().find_map(|line| {
@@ -223,14 +183,12 @@ pub fn user_name(uid: u32) -> Option<String> {
     })
 }
 
-/// MD5 of the process as reported by the daemon (needs `Rules.EnableChecksums`).
 pub fn md5(con: &Connection) -> &str {
     con.process_checksums
         .get("process.hash.md5")
         .map_or("", String::as_str)
 }
 
-/// Plain-text body of the details page.
 pub fn details_text(con: &Connection, user: &str) -> String {
     let mut out = format!(
         "{} {}:{} -> {}:{}\n\n",
@@ -270,6 +228,49 @@ pub fn details_text(con: &Connection, user: &str) -> String {
         }
     }
     out
+}
+
+fn clause_text(op: &Operator) -> String {
+    let data = printable(&op.data);
+    match op.operand.as_str() {
+        "process.path" | "dest.ip" => data,
+        "process.command" => format!("command {data}"),
+        "process.id" => format!("pid {data}"),
+        "process.hash.md5" => format!("checksum {data}"),
+        "user.id" => format!("user {data}"),
+        "dest.host" => format!("host {data}"),
+        "dest.port" => format!("port {data}"),
+        "dest.network" => format!("network {data}"),
+        other => format!("{other} {data}"),
+    }
+}
+
+pub fn rule_clauses(rule: &Rule) -> String {
+    fn join(op: &Operator) -> Vec<String> {
+        if op.list.is_empty() {
+            vec![clause_text(op)]
+        } else {
+            op.list.iter().flat_map(join).collect()
+        }
+    }
+    match &rule.operator {
+        Some(op) => join(op).join(" and "),
+        None => String::new(),
+    }
+}
+
+pub fn rule_matches(rule: &Rule, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return true;
+    }
+    [
+        rule.name.as_str(),
+        rule.description.as_str(),
+        &rule_clauses(rule),
+    ]
+    .iter()
+    .any(|field| field.to_lowercase().contains(&query))
 }
 
 #[cfg(test)]
@@ -371,13 +372,11 @@ mod tests {
     #[test]
     fn a_program_borrows_a_desktop_entry_only_from_a_system_directory() {
         let same = |exec: &str, process: &str| same_program(Path::new(exec), Path::new(process));
-        // `Exec=firefox` is just a name.
         assert!(same("firefox", "/usr/lib/firefox/firefox"));
         assert!(same("firefox", "/usr/bin/firefox"));
         assert!(!same("firefox", "/tmp/evil/firefox"));
         assert!(!same("firefox", "/home/user/.cache/firefox"));
         assert!(!same("chrome", "/usr/bin/firefox"));
-        // An entry that names the exact binary matches it wherever it is.
         assert!(same("/opt/app/bin/app", "/opt/app/bin/app"));
         assert!(same("/home/user/app/app", "/home/user/app/app"));
         assert!(!same("", "/usr/bin/firefox"));
@@ -444,10 +443,100 @@ mod tests {
         );
     }
 
+    fn simple(operand: &str, data: &str) -> Operator {
+        Operator {
+            r#type: "simple".into(),
+            operand: operand.into(),
+            data: data.into(),
+            ..Default::default()
+        }
+    }
+
+    fn listed(list: Vec<Operator>) -> Operator {
+        Operator {
+            r#type: "list".into(),
+            operand: "list".into(),
+            list,
+            ..Default::default()
+        }
+    }
+
+    fn saved(action: &str, duration: &str, operator: Operator) -> Rule {
+        Rule {
+            name: "allow-always-simple-curl".into(),
+            action: action.into(),
+            duration: duration.into(),
+            operator: Some(operator),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn truncation() {
-        assert_eq!(truncate("abcdef", 3), "abc...");
-        assert_eq!(truncate("abc", 3), "abc");
+    fn list_clauses_are_joined_by_and() {
+        let rule = saved(
+            "allow",
+            "5m",
+            listed(vec![
+                simple("dest.port", "443"),
+                simple("user.id", "1000"),
+                simple("process.path", "/usr/bin/curl"),
+            ]),
+        );
+        assert_eq!(
+            rule_clauses(&rule),
+            "port 443 and user 1000 and /usr/bin/curl"
+        );
+    }
+
+    #[test]
+    fn nested_lists_are_flattened_into_the_same_line() {
+        let rule = saved(
+            "allow",
+            "always",
+            listed(vec![
+                simple("dest.host", "example.com"),
+                listed(vec![simple("dest.port", "80"), simple("dest.port", "443")]),
+            ]),
+        );
+        assert_eq!(
+            rule_clauses(&rule),
+            "host example.com and port 80 and port 443"
+        );
+    }
+
+    #[test]
+    fn operands_without_a_name_keep_theirs() {
+        let rule = saved("allow", "always", simple("dest.mac", "aa:bb:cc:dd:ee:ff"));
+        assert_eq!(rule_clauses(&rule), "dest.mac aa:bb:cc:dd:ee:ff");
+    }
+
+    #[test]
+    fn a_rule_without_an_operator_has_no_clauses() {
+        let rule = Rule {
+            name: "empty".into(),
+            action: "allow".into(),
+            duration: "always".into(),
+            ..Default::default()
+        };
+        assert_eq!(rule_clauses(&rule), "");
+    }
+
+    #[test]
+    fn the_filter_reads_name_description_and_clauses() {
+        let mut rule = saved("allow", "always", simple("process.path", "/usr/bin/curl"));
+        rule.description = "dev box".into();
+        assert!(rule_matches(&rule, ""));
+        assert!(rule_matches(&rule, "  "));
+        assert!(rule_matches(&rule, "CURL"));
+        assert!(rule_matches(&rule, "dev"));
+        assert!(rule_matches(&rule, "usr/bin"));
+        assert!(!rule_matches(&rule, "firefox"));
+    }
+
+    #[test]
+    fn clause_text_drops_control_characters() {
+        let rule = saved("allow", "always", simple("process.path", "/tmp/a\nb"));
+        assert!(!rule_clauses(&rule).contains('\n'));
     }
 
     #[test]

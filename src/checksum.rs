@@ -1,29 +1,19 @@
-//! Detecting programs whose MD5 no longer matches the one pinned in a rule,
-//! ported from the Qt UI (`dialogs/prompt/checksums.py`).
-//!
-//! Only list rules can pin a checksum: they hold the program path plus a
-//! `process.hash.md5` condition.
 
 use crate::model::{kind, operand};
 use crate::proto::{Connection, Operator, Rule};
 
-/// Rules whose pinned checksum differs from the running program's.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Mismatch {
-    /// Names of the rules that can be updated.
     pub rule_names: Vec<String>,
-    /// Checksums those rules expect (the running program has a different one).
     pub expected: Vec<String>,
 }
 
 impl Mismatch {
-    /// True when at least one rule disagrees with the running program.
     pub fn is_empty(&self) -> bool {
         self.rule_names.is_empty()
     }
 }
 
-/// True for rules that can still apply: enabled, not one-shot, not expired.
 fn is_active(rule: &Rule, now: i64) -> bool {
     if !rule.enabled || rule.duration == "once" {
         return false;
@@ -38,7 +28,6 @@ fn conditions(rule: &Rule) -> &[Operator] {
         .map_or(&[], |op| op.list.as_slice())
 }
 
-/// The checksum a list rule pins, if any.
 fn pinned_checksum(rule: &Rule) -> Option<&str> {
     conditions(rule)
         .iter()
@@ -46,17 +35,12 @@ fn pinned_checksum(rule: &Rule) -> Option<&str> {
         .map(|op| op.data.as_str())
 }
 
-/// True when the rule matches the program at `path`.
 fn matches_path(rule: &Rule, path: &str) -> bool {
     conditions(rule)
         .iter()
         .any(|op| op.operand == operand::PROCESS_PATH && op.data == path)
 }
 
-/// Finds the active rules for the connection's program that pin another checksum.
-///
-/// A missing checksum on the connection (the daemon couldn't compute it, or
-/// `Rules.EnableChecksums` is off) never counts as a mismatch.
 pub fn find<'a>(rules: impl IntoIterator<Item = &'a Rule>, con: &Connection, now: i64) -> Mismatch {
     let current = crate::view::md5(con);
     let mut out = Mismatch::default();
@@ -77,7 +61,6 @@ pub fn find<'a>(rules: impl IntoIterator<Item = &'a Rule>, con: &Connection, now
     out
 }
 
-/// Text of the checksums page: what the program has and what the rules expect.
 pub fn note(con: &Connection, mismatch: &Mismatch) -> String {
     format!(
         "Checksums differ for at least one rule.\n\nCurrent process ({}):\n{}\n\nExpected from the rules:\n{}",
@@ -87,7 +70,6 @@ pub fn note(con: &Connection, mismatch: &Mismatch) -> String {
     )
 }
 
-/// Copy of `rule` with its pinned checksum replaced by `md5`.
 pub fn with_checksum(rule: &Rule, md5: &str) -> Rule {
     let mut updated = rule.clone();
     if let Some(op) = updated.operator.as_mut() {

@@ -1,38 +1,21 @@
-//! Reader for the OpenSnitch Qt UI settings (`~/.config/opensnitch/settings.conf`).
-//!
-//! The file is a plain QSettings INI. Only the keys that influence the prompt
-//! dialog are interpreted; everything else is ignored.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// Default `unix:` address the daemon connects to.
 pub const DEFAULT_ADDRESS: &str = "unix:///tmp/osui.sock";
 
-/// Prompt-related options saved by the Qt UI preferences dialog.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
-    /// Index of the default action: 0 = drop (deny), 1 = allow, 2 = reject.
     pub default_action: usize,
-    /// Index into [`crate::rule::DURATIONS`].
     pub default_duration: usize,
-    /// Index of the default "apply to" target (0 executable .. 5 PID).
     pub default_target: usize,
-    /// Seconds before the default action is applied; 0 disables the popup.
     pub timeout: u32,
-    /// 0 center, 1 top right, 2 bottom right, 3 top left, 4 bottom left.
     pub popup_position: u32,
-    /// Start with the advanced view expanded.
     pub advanced: bool,
-    /// Pre-check "destination IP".
     pub advanced_dstip: bool,
-    /// Pre-check "destination port".
     pub advanced_dstport: bool,
-    /// Pre-check "user ID".
     pub advanced_uid: bool,
-    /// Pre-check "checksum".
     pub advanced_checksum: bool,
-    /// Address the UI gRPC server should listen on, if configured.
     pub server_address: Option<String>,
 }
 
@@ -55,7 +38,6 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// Location of the Qt UI settings file, honoring `XDG_CONFIG_HOME`.
     pub fn default_path() -> PathBuf {
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
@@ -65,7 +47,6 @@ impl Settings {
         base.join("opensnitch").join("settings.conf")
     }
 
-    /// Loads the settings from `path`; a missing or unreadable file gives defaults.
     pub fn load(path: &Path) -> Self {
         match std::fs::read_to_string(path) {
             Ok(text) => Self::parse(&text),
@@ -76,7 +57,6 @@ impl Settings {
         }
     }
 
-    /// Parses the INI `text`, falling back to defaults for absent or invalid keys.
     pub fn parse(text: &str) -> Self {
         let values = parse_ini(text);
         let def = Self::default();
@@ -104,13 +84,11 @@ impl Settings {
         }
     }
 
-    /// True when popups are disabled (the Qt UI stores that as a zero timeout).
     pub fn popups_disabled(&self) -> bool {
         self.timeout == 0
     }
 }
 
-/// Flattens an INI file into `section/key -> value` pairs.
 fn parse_ini(text: &str) -> HashMap<String, String> {
     let mut section = String::new();
     let mut out = HashMap::new();

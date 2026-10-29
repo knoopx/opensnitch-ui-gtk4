@@ -1,14 +1,8 @@
-//! The "apply to" choices offered by the prompt, ported from the Qt UI
-//! (`ui/opensnitch/dialogs/prompt/utils.py`).
-//!
-//! Each [`Target`] carries the rule operator it produces, so the dialog only
-//! has to show the label and the rule builder only has to read the operator.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::proto::Connection;
 
-/// Operator type strings understood by the daemon.
 pub mod kind {
     pub const SIMPLE: &str = "simple";
     pub const REGEXP: &str = "regexp";
@@ -16,7 +10,6 @@ pub mod kind {
     pub const LIST: &str = "list";
 }
 
-/// Operand strings understood by the daemon.
 pub mod operand {
     pub const PROCESS_PATH: &str = "process.path";
     pub const PROCESS_COMMAND: &str = "process.command";
@@ -31,7 +24,6 @@ pub mod operand {
 
 const APPIMAGE_PREFIX: &str = "/tmp/.mount_";
 
-/// Network aliases from the Qt UI's `network_aliases.json`.
 const ALIASES: &[(&str, &[&str])] = &[
     (
         "LAN",
@@ -47,7 +39,6 @@ const ALIASES: &[(&str, &[&str])] = &[
     ("MULTICAST", &["224.0.0.0/4", "ff00::/8"]),
 ];
 
-/// What a [`Target`] matches on; the rule builder needs it for special cases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Field {
     ProcPath,
@@ -64,7 +55,15 @@ pub enum Field {
     Snap,
 }
 
-/// A rule operator: `type`, `operand` and `data`.
+impl Field {
+    pub fn is_process(self) -> bool {
+        matches!(
+            self,
+            Self::ProcPath | Self::ProcArgs | Self::ProcId | Self::AppImage | Self::Snap
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Op {
     pub kind: &'static str,
@@ -73,7 +72,7 @@ pub struct Op {
 }
 
 impl Op {
-    fn simple(operand: &'static str, data: impl Into<String>) -> Self {
+    pub(crate) fn simple(operand: &'static str, data: impl Into<String>) -> Self {
         Self {
             kind: kind::SIMPLE,
             operand,
@@ -82,15 +81,11 @@ impl Op {
     }
 }
 
-/// One entry of an "apply to" combo.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
-    /// Text shown in the combo.
     pub label: String,
     pub field: Field,
-    /// Operator produced when this target is selected.
     pub op: Op,
-    /// Disabled entries are shown but cannot be selected.
     pub enabled: bool,
 }
 
@@ -105,20 +100,12 @@ impl Target {
     }
 }
 
-/// Sentinel the daemon sends for an unknown PID or UID (`-1` as `uint32`).
 const UNKNOWN: u32 = u32::MAX;
 
-/// Space-joined command line of the connection.
 pub fn command_line(con: &Connection) -> String {
     con.process_args.join(" ")
 }
 
-/// Escapes `text` so that a regular expression matches it literally.
-///
-/// This is the set Go's `regexp.QuoteMeta` escapes, the engine the daemon uses.
-/// Everything that comes from a program or the network (paths, host names) must
-/// go through it: unescaped, a name like `x|.*` would turn a rule into one that
-/// matches every program.
 pub fn regex_escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -130,10 +117,6 @@ pub fn regex_escape(text: &str) -> String {
     out
 }
 
-/// A target whose operator is built from the connection, not from its label.
-///
-/// The label is shown to the user, so control characters are dropped from it.
-/// The operator keeps the exact text.
 fn target(field: Field, label: impl AsRef<str>, op: Op) -> Target {
     Target::new(crate::view::printable(label.as_ref()), field, op)
 }
@@ -154,10 +137,8 @@ fn regexp_op(operand: &'static str, data: String) -> Op {
     }
 }
 
-/// The six fixed entries, in the order the Qt preferences use for the default target.
 fn fixed_targets(con: &Connection) -> Vec<Target> {
     let exe = Op::simple(operand::PROCESS_PATH, &con.process_path);
-    // Without a command line the executable is the best that can be matched.
     let command = if con.process_args.first().is_none_or(String::is_empty) {
         exe.clone()
     } else {
@@ -193,7 +174,6 @@ fn fixed_targets(con: &Connection) -> Vec<Target> {
     ]
 }
 
-/// Name of the network alias (LAN, MULTICAST) `ip` belongs to, if any.
 pub fn network_alias(ip: &str) -> Option<&'static str> {
     let ip: IpAddr = ip.parse().ok()?;
     ALIASES
@@ -202,7 +182,6 @@ pub fn network_alias(ip: &str) -> Option<&'static str> {
         .map(|(name, _)| *name)
 }
 
-/// True when `ip` is inside the `addr/prefix` network `cidr`.
 fn in_cidr(ip: IpAddr, cidr: &str) -> bool {
     let Some((addr, prefix)) = cidr.split_once('/') else {
         return false;
@@ -261,10 +240,6 @@ fn network_targets(con: &Connection) -> Vec<Target> {
     out
 }
 
-/// Host entry plus one wildcard entry per parent domain (down to two labels).
-///
-/// Host names come from DNS answers, so they are untrusted: the wildcard
-/// regexps are built from the escaped name.
 fn host_targets(con: &Connection) -> Vec<Target> {
     if con.dst_host.is_empty() || con.dst_host == con.dst_ip {
         return Vec::new();
@@ -277,7 +252,6 @@ fn host_targets(con: &Connection) -> Vec<Target> {
     let parts: Vec<&str> = con.dst_host.split('.').skip(1).collect();
     for i in 0..parts.len().saturating_sub(1) {
         let domain = parts[i..].join(".");
-        // "to *.yahoo.com" -> ^(|.*\.)yahoo\.com$
         let data = format!("^(|.*\\.){}$", regex_escape(&domain));
         out.push(target(
             Field::RegexHost,
@@ -288,13 +262,11 @@ fn host_targets(con: &Connection) -> Vec<Target> {
     out
 }
 
-/// `to 1.*`, `to 1.2.*`, `to 1.2.3.*` for an IPv4 destination.
 fn ip_regexp_targets(con: &Connection) -> Vec<Target> {
     let parts: Vec<&str> = con.dst_ip.split('.').collect();
     (1..parts.len())
         .map(|i| {
             let prefix = parts[..i].join(".");
-            // "to 1.2.*" -> 1\.2\..*
             let data = format!("{}.*", regex_escape(&format!("{prefix}.")));
             target(
                 Field::RegexIp,
@@ -305,15 +277,9 @@ fn ip_regexp_targets(con: &Connection) -> Vec<Target> {
         .collect()
 }
 
-/// The AppImage pattern for `/tmp/.mount_<6 chars><suffix>/.../<bin>`.
-///
-/// Anyone can create such a directory, so the pattern is only offered when the
-/// mount name has the shape AppImage creates, and every part of it is escaped.
-/// The pattern then matches that program's mounts and nothing broader.
 fn appimage_target(con: &Connection) -> Option<Target> {
     let rest = con.process_path.strip_prefix(APPIMAGE_PREFIX)?;
     let (mount, inner) = rest.split_once('/')?;
-    // 6 characters of the app's name, then a random alphanumeric suffix.
     let split = mount.char_indices().nth(6).map(|(i, _)| i)?;
     let (head, tail) = mount.split_at(split);
     let bin = inner.rsplit('/').next().filter(|b| !b.is_empty())?;
@@ -336,9 +302,6 @@ fn appimage_target(con: &Connection) -> Option<Target> {
     ))
 }
 
-/// The snap pattern for `/snap/<name>/<revision>/...`, with the revision as a wildcard.
-///
-/// Only offered for a valid snap name and a numeric revision; every part is escaped.
 fn snap_target(con: &Connection) -> Option<Target> {
     let rest = con.process_path.strip_prefix("/snap/")?;
     let mut parts = rest.split('/');
@@ -361,7 +324,6 @@ fn snap_target(con: &Connection) -> Option<Target> {
     ))
 }
 
-/// Entries of the main "apply to" combo.
 pub fn what_targets(con: &Connection) -> Vec<Target> {
     let mut out = fixed_targets(con);
     out.extend(appimage_target(con));
@@ -372,7 +334,13 @@ pub fn what_targets(con: &Connection) -> Vec<Target> {
     out
 }
 
-/// Entries of the "destination IP" combo shown in the advanced view.
+pub fn from_targets(con: &Connection) -> Vec<Target> {
+    what_targets(con)
+        .into_iter()
+        .filter(|t| t.field.is_process())
+        .collect()
+}
+
 pub fn ip_targets(con: &Connection) -> Vec<Target> {
     let mut out = host_targets(con);
     out.push(target(
@@ -385,10 +353,8 @@ pub fn ip_targets(con: &Connection) -> Vec<Target> {
     out
 }
 
-/// Index of the entry to preselect, following the Qt UI's `set_default_target`.
 pub fn default_target_index(targets: &[Target], con: &Connection, saved: usize) -> usize {
     let find = |field: Field| targets.iter().position(|t| t.field == field);
-    // These patterns are only in the list when the path has the expected shape.
     if let Some(idx) = find(Field::AppImage).or_else(|| find(Field::Snap)) {
         return idx;
     }
@@ -402,6 +368,36 @@ pub fn default_target_index(targets: &[Target], con: &Connection, saved: usize) 
         _ if known_pid && has_name => 0,
         _ => 2,
     }
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Plan {
+    pub from: Option<usize>,
+    pub ip: Option<usize>,
+    pub port: bool,
+    pub uid: bool,
+}
+
+pub fn default_plan(from: &[Target], ip: &[Target], con: &Connection, saved: usize) -> Plan {
+    let all = what_targets(con);
+    let Some(t) = all.get(default_target_index(&all, con, saved)) else {
+        return Plan::default();
+    };
+    let mut plan = Plan::default();
+    match t.field {
+        Field::DstPort => plan.port = true,
+        Field::UserId => plan.uid = true,
+        Field::DstIp | Field::DstNetwork | Field::DstHost | Field::RegexIp | Field::RegexHost => {
+            plan.ip = ip.iter().position(|e| e.op == t.op)
+        }
+        _ => {
+            plan.from = from
+                .iter()
+                .position(|e| e.op == t.op)
+                .or(if from.is_empty() { None } else { Some(0) });
+        }
+    }
+    plan
 }
 
 #[cfg(test)]
@@ -509,8 +505,6 @@ mod tests {
         assert_eq!(t[idx].op.data, r"^/snap/firefox/[0-9]+/usr/lib/firefox$");
     }
 
-    /// What is left of a regexp once every escaped character is removed, to look
-    /// for operators (like `|`) that would change what it matches.
     fn unescaped(regexp: &str) -> String {
         let mut out = String::new();
         let mut chars = regexp.chars();
@@ -539,9 +533,6 @@ mod tests {
         );
     }
 
-    /// The attack that motivated escaping. A program named `x|.*` in a directory
-    /// that looks like an AppImage mount used to give a rule ending in `|.*$`,
-    /// which matches every path, and AppImage is the default selection.
     #[test]
     fn hostile_appimage_name_cannot_widen_the_rule() {
         let mut c = con();
@@ -622,9 +613,6 @@ mod tests {
         assert_eq!(snap.op.data, r"^/snap/app/[0-9]+/bin/a\|b$");
     }
 
-    /// Host names come from DNS answers. This one has a space and regexp
-    /// syntax. The rule used to be built from the last word of the label, which
-    /// here is only a fragment of the name.
     #[test]
     fn hostile_host_name_is_escaped_in_the_wildcard_rule() {
         let mut c = con();
@@ -668,6 +656,90 @@ mod tests {
         unknown.process_path.clear();
         unknown.process_id = 0;
         assert_eq!(default_target_index(&t, &unknown, 0), 2);
+    }
+
+    #[test]
+    fn from_entries_are_the_program_clauses_only() {
+        assert_eq!(
+            labels(&from_targets(&con())),
+            [
+                "from this executable",
+                "from this command line",
+                "from this PID"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_saved_target_lands_on_the_row_that_replaces_it() {
+        let c = con();
+        let from = from_targets(&c);
+        let ip = ip_targets(&c);
+        let plan = |saved| default_plan(&from, &ip, &c, saved);
+        assert_eq!(
+            plan(0),
+            Plan {
+                from: Some(0),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            plan(1),
+            Plan {
+                from: Some(1),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            plan(5),
+            Plan {
+                from: Some(2),
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            plan(2),
+            Plan {
+                port: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            plan(4),
+            Plan {
+                uid: true,
+                ..Default::default()
+            }
+        );
+        assert_eq!(
+            plan(3),
+            Plan {
+                ip: ip.iter().position(|t| t.label == "to 93.184.216.34"),
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn an_appimage_path_preselects_its_pattern() {
+        let mut c = con();
+        c.process_path = "/tmp/.mount_Cursorexample/usr/bin/cursor".into();
+        let from = from_targets(&c);
+        let plan = default_plan(&from, &ip_targets(&c), &c, 0);
+        assert_eq!(
+            plan.from.and_then(|i| from.get(i)).map(|t| t.field),
+            Some(Field::AppImage)
+        );
+    }
+
+    #[test]
+    fn a_saved_entry_the_prompt_does_not_show_falls_back_to_the_first() {
+        let mut c = con();
+        c.process_path = "/tmp/.mount_Cursorexample/usr/bin/cursor".into();
+        let mut from = from_targets(&c);
+        from.retain(|t| t.field != Field::AppImage);
+        let plan = default_plan(&from, &ip_targets(&c), &c, 0);
+        assert_eq!(plan.from, Some(0));
     }
 
     #[test]
