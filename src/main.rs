@@ -1,4 +1,3 @@
-
 mod bus;
 mod checksum;
 mod dialog;
@@ -143,7 +142,12 @@ fn spawn_server(
                 () = server::shutdown_signal() => Ok(()),
             }
         });
-        if let Some(path) = server::socket_path(&address) {
+        // Only a UI that got as far as binding clears the path. Unlinking the
+        // socket of the UI that is still listening would cut that one off its
+        // daemon, which is the outage a stale socket causes in the first place.
+        if outcome.is_ok()
+            && let Some(path) = server::socket_path(&address)
+        {
             let _ = std::fs::remove_file(path);
         }
         if let Err(err) = outcome {

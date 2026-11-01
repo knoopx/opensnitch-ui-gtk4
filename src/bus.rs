@@ -1,4 +1,3 @@
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -38,7 +37,9 @@ pub fn serve(updater: Updater, settings: PathBuf) {
         },
         |_, _| {},
         |_, _| {
-            tracing::warn!("cannot own {NAME} on the session bus; is opensnitch-ui-gtk4 already running?")
+            tracing::warn!(
+                "cannot own {NAME} on the session bus; is opensnitch-ui-gtk4 already running?"
+            )
         },
     );
 }

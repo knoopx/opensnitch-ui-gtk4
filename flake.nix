@@ -35,6 +35,14 @@
         pkgs.hicolor-icon-theme
         pkgs.gsettings-desktop-schemas
       ];
+      # Icon themes, as $XDG_DATA_DIRS entries: GLib finds icons under
+      # $XDG_DATA_DIRS/icons. The compiled gsettings catalogues need the same
+      # treatment, but wrapGAppsHook4 already puts those on the path, so only
+      # the themes are added by the wrapper below.
+      iconDirs = pkgs:
+        builtins.concatStringsSep ":" (
+          map (p: "${p}/share") [ pkgs.adwaita-icon-theme pkgs.hicolor-icon-theme ]
+        );
       # The package, so the flake can expose it as a package *and* through an
       # overlay for a NixOS system that wants `pkgs.opensnitch-ui-gtk4`.
       package = pkgs: pkgs.rustPlatform.buildRustPackage {
@@ -48,8 +56,21 @@
           allowBuiltinFetchGit = true;
         };
 
-        nativeBuildInputs = nativePackages pkgs;
+        nativeBuildInputs = (nativePackages pkgs) ++ [ pkgs.wrapGAppsHook4 ];
         buildInputs = buildPackages pkgs;
+
+        # A prompt started as a systemd user service inherits no session
+        # environment, so it finds no icon theme for the program it asks about.
+        # wrapGAppsHook4 covers the rest of what a bare service lacks: it
+        # prefixes XDG_DATA_DIRS with the compiled gsettings catalogues of
+        # gsettings-desktop-schemas and gtk4 (without them libadwaita answers
+        # `g_settings_schema_source_lookup: assertion 'source != NULL' failed`),
+        # and sets GDK_PIXBUF_MODULE_FILE and GIO_EXTRA_MODULES. It does not
+        # touch icons, so those are the only entries added here.
+        postFixup = ''
+          wrapProgram $out/bin/opensnitch-ui-gtk4 \
+            --prefix XDG_DATA_DIRS ':' "${iconDirs pkgs}"
+        '';
 
         meta = {
           description = "GTK4 UI for OpenSnitch";

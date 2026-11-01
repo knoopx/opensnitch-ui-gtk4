@@ -1,4 +1,3 @@
-
 use crate::model::{kind, operand};
 use crate::proto::{Connection, Operator, Rule};
 

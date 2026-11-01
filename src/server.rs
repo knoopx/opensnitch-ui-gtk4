@@ -1,4 +1,3 @@
-
 use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
@@ -299,6 +298,48 @@ pub fn socket_path(address: &str) -> Option<PathBuf> {
     }
 }
 
+/// The user a file belongs to, when it can be looked at. It is the path itself
+/// that has to be unlinked, so look at the link rather than where it points.
+fn file_owner(path: &Path) -> Option<u32> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path).ok().map(|meta| meta.uid())
+}
+
+fn this_uid() -> u32 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata("/proc/self").map_or(0, |meta| meta.uid())
+}
+
+/// Why a socket owned by somebody else cannot be taken over.
+///
+/// `unlink` answers EPERM only in a directory with the sticky bit, to a process
+/// that owns neither the file nor the directory, so the bare errno says nothing
+/// about whose socket it is or who is able to clear it. Any other errno means a
+/// different problem (a directory this user may not write to at all), and
+/// blaming an owner then would be wrong.
+///
+/// The message cannot call the socket a leftover: another user's socket is
+/// mode 0600, so the liveness probe is refused (EACCES) rather than answered,
+/// and a UI still running looks exactly like one long dead.
+fn stale_socket_error(path: &Path, owner: Option<u32>, err: &std::io::Error) -> String {
+    const EPERM: i32 = 1;
+    let me = this_uid();
+    let theirs = owner.filter(|uid| *uid != me);
+    if err.raw_os_error() == Some(EPERM)
+        && let Some(uid) = theirs
+    {
+        let dir = path.parent().map_or_else(
+            || "its directory".to_string(),
+            |dir| dir.display().to_string(),
+        );
+        return format!(
+            "cannot take the socket {}: it belongs to uid {uid}, not to this UI (uid {me}), and {dir} is sticky, so only uid {uid}, the owner of {dir}, or root can unlink it. One UI answers the daemon at a time: stop the UI of the other session (the login screen starts one, and it may still be running), or listen somewhere else with --socket and point the daemon's Server.Address at it",
+            path.display(),
+        );
+    }
+    format!("cannot replace the socket {}: {err}", path.display())
+}
+
 async fn bind_unix(path: &Path) -> Result<UnixListener, BoxError> {
     if UnixStream::connect(path).await.is_ok() {
         return Err(format!("another UI is already listening on {}", path.display()).into());
@@ -306,7 +347,7 @@ async fn bind_unix(path: &Path) -> Result<UnixListener, BoxError> {
     match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(stale_socket_error(path, file_owner(path), &e).into()),
     }
     let listener = UnixListener::bind(path)?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
@@ -349,9 +390,15 @@ pub async fn serve(address: &str, service: Service, allowed_uids: &[u32]) -> Res
     match parse_address(address) {
         Listen::Unix(path) => {
             let listener = bind_unix(&path).await?;
-            server
+            let served = server
                 .serve_with_incoming(UnixListenerStream::new(listener))
-                .await?;
+                .await;
+            if served.is_err() {
+                // The caller unlinks the socket on a clean stop only, so an
+                // error part way through would leave our own behind.
+                let _ = std::fs::remove_file(&path);
+            }
+            served?;
         }
         Listen::Abstract(name) => {
             let listener = bind_abstract(&name)?;
@@ -764,36 +811,114 @@ mod tests {
         assert!(!PeerPolicy::new(&[]).allows(1000));
     }
 
-    #[tokio::test]
-    async fn a_non_root_process_is_refused_on_a_unix_socket() {
-        check_unix_peer_policy().await;
+    #[test]
+    fn a_socket_left_by_another_user_says_who_can_remove_it() {
+        let stuck = std::io::Error::from_raw_os_error(1); // EPERM, what a sticky dir answers
+        let other = this_uid() + 1;
+        let msg = stale_socket_error(Path::new("/tmp/osui.sock"), Some(other), &stuck);
+        assert!(msg.contains(&format!("belongs to uid {other}")), "{msg}");
+        assert!(msg.contains("root"), "{msg}");
+        assert!(msg.contains("--socket"), "{msg}");
+        assert!(msg.contains("Server.Address"), "{msg}");
+        assert!(msg.contains("sticky"), "{msg}");
     }
 
-    async fn check_unix_peer_policy() {
+    #[test]
+    fn a_socket_of_our_own_reports_the_errno() {
+        let stuck = std::io::Error::from_raw_os_error(1);
+        let msg = stale_socket_error(Path::new("/tmp/osui.sock"), Some(this_uid()), &stuck);
+        assert!(msg.contains("Operation not permitted"), "{msg}");
+    }
+
+    #[test]
+    fn a_directory_the_ui_may_not_write_to_does_not_blame_an_owner() {
+        let denied = std::io::Error::from_raw_os_error(13); // EACCES, no write on the dir
+        let msg = stale_socket_error(Path::new("/run/osui.sock"), Some(this_uid() + 1), &denied);
+        assert!(msg.contains("Permission denied"), "{msg}");
+        assert!(!msg.contains("can unlink it"), "{msg}");
+    }
+
+    fn socket_named(name: &str) -> PathBuf {
+        let nano = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.subsec_nanos());
+        std::env::temp_dir().join(format!("snitch-{name}-{}-{nano}.sock", std::process::id()))
+    }
+
+    #[tokio::test]
+    async fn a_socket_left_behind_by_a_dead_ui_is_replaced() {
+        let path = socket_named("stale");
+        let _ = std::fs::remove_file(&path);
+        let gone = UnixListener::bind(&path).unwrap();
+        drop(gone); // the file survives its listener
+        let listener = bind_unix(&path).await.expect("stale socket replaced");
+        assert!(listener.local_addr().is_ok());
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the daemon is the only peer");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn a_socket_a_live_ui_holds_is_left_alone() {
+        let path = socket_named("taken");
+        let _ = std::fs::remove_file(&path);
+        let holding = UnixListener::bind(&path).unwrap();
+        let err = bind_unix(&path).await.unwrap_err().to_string();
+        assert!(err.contains("another UI is already listening"), "{err}");
+        UnixStream::connect(&path)
+            .await
+            .expect("the UI that holds the socket still answers");
+        drop(holding);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn a_ui_that_never_bound_leaves_the_socket_to_its_owner() {
+        let path = socket_named("loser");
+        let _ = std::fs::remove_file(&path);
+        let holding = UnixListener::bind(&path).unwrap();
+        let (tx, _rx) = async_channel::unbounded::<PromptRequest>();
+        let service = Service::new(tx, PathBuf::from("/nonexistent/settings.conf"));
+        let err = serve(&format!("unix:{}", path.display()), service, &[])
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("another UI is already listening"), "{err}");
+        UnixStream::connect(&path)
+            .await
+            .expect("the UI that lost the socket unlinked nothing");
+        drop(holding);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// What the policy owes a connection from `uid`: the same answer the
+    /// interceptor gives, whether it arrives over a socket or over TCP.
+    fn served_to(allowed: &[u32], uid: u32) -> Served {
+        if PeerPolicy::new(allowed).allows(uid) {
+            Served::Reply
+        } else {
+            Served::Refused
+        }
+    }
+
+    #[tokio::test]
+    async fn the_unix_policy_answers_only_the_listed_uids() {
         use std::os::unix::fs::MetadataExt;
 
-        let own_uid = std::fs::metadata("/proc/self").unwrap().uid();
-        for allowed in [vec![], vec![own_uid]] {
+        let own = std::fs::metadata("/proc/self").unwrap().uid();
+        for allowed in [vec![], vec![own]] {
             let outcome = unix_ping_outcome(&allowed).await;
-            let expect = if allowed.is_empty() && own_uid != 0 {
-                Served::Refused
-            } else {
-                Served::Reply
-            };
+            let want = served_to(&allowed, own);
             assert_eq!(
                 outcome,
-                Ok(expect),
-                "allowed uids {allowed:?}, running as {own_uid}"
+                Ok(want),
+                "allowed {allowed:?}, running as uid {own}"
             );
         }
     }
 
     async fn unix_ping_outcome(allowed: &[u32]) -> Result<Served, String> {
-        let path = std::env::temp_dir().join(format!(
-            "snitch-peer-{}-{}.sock",
-            std::process::id(),
-            allowed.len()
-        ));
+        let path = socket_named(&format!("peer-{}", allowed.len()));
         let (server, mut conn) =
             serve_and_connect(format!("unix:{}", path.display()), &path, allowed.to_vec()).await;
         let outcome = ping_outcome(&mut conn).await;

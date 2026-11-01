@@ -1,4 +1,3 @@
-
 use std::cell::{Cell, RefCell};
 use std::rc::{Rc, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1036,9 +1035,7 @@ mod tests {
         let filter = rule_filter::RuleFilter::new(Rc::clone(&criteria));
         let store = gtk::gio::ListStore::new::<row_item::RuleRow>();
         store.append(&row_item::RuleRow::new(row(&rule(
-            "alpha",
-            "allow",
-            "always",
+            "alpha", "allow", "always",
         ))));
         store.append(&row_item::RuleRow::new(row(&rule("beta", "deny", "1h"))));
         let model = gtk::FilterListModel::new(Some(store), Some(filter.clone()));

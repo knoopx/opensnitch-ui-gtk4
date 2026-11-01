@@ -1,4 +1,3 @@
-
 use crate::model::{self, Field, Op, Target, kind, operand};
 use crate::proto::{Connection, Operator, Rule};
 use crate::settings::Settings;

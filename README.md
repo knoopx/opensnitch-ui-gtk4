@@ -48,9 +48,20 @@ systemd.user.services.opensnitch-ui-gtk4 = {
   Unit.After = [ "graphical-session.target" ];
   Service.ExecStart = "${pkgs.opensnitch-ui-gtk4}/bin/opensnitch-ui-gtk4";
   Service.Restart = "on-failure";
+  Service.RestartSec = 5;
   Install.WantedBy = [ "graphical-session.target" ];
 };
 ```
+
+One UI listens on one socket, so a machine runs one UI, not one per session.
+`/tmp/osui.sock` is where opensnitchd's `Server.Address` points; `--socket` (or
+the Qt UI's `server_address`) moves it, and the daemon has to be told the new
+address. A unit under the system's `systemd.user.services` starts for every
+session, the login screen's included: the greeter's UI binds the socket, and
+when it goes away its owner is the only one who can unlink it, so the real
+session never gets the socket back. Declare the unit in the user's own home
+(`home-manager.users.<name>.systemd.user.services`, or add a `ConditionUser` to
+the system unit), and keep `PartOf` so the UI goes down with its session.
 
 ## Development
 
