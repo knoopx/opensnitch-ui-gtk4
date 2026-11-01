@@ -346,18 +346,35 @@ thread_local! {
 
 pub fn show(app: &adw::Application, updater: Updater) {
     OPEN.with(|open| {
-        if let Some(existing) = open.borrow().first() {
-            existing.window.present();
+        if let Some(existing) = living(open) {
+            existing.present();
             return;
         }
         let manager = Manager::new(app, updater);
         manager.reload();
+        watch_close(&manager);
         open.borrow_mut().push(Rc::clone(&manager));
-        let gone = manager.window.clone();
-        manager.window.connect_destroy(move |_| {
-            OPEN.with(|open| open.borrow_mut().retain(|m| m.window != gone));
-        });
         manager.window.present();
+    });
+}
+
+/// The open window, dropping the ones that were closed: GTK stopped emitting
+/// `GtkWidget::destroy`, so a window is recognised as gone by the application
+/// having let it go. Presenting a closed window leaves it inconsistent, and it
+/// never comes back.
+fn living(open: &RefCell<Vec<Rc<Manager>>>) -> Option<adw::ApplicationWindow> {
+    let mut open = open.borrow_mut();
+    open.retain(|manager| manager.window.application().is_some());
+    open.first().map(|manager| manager.window.clone())
+}
+
+/// Retire the window the moment it is closed, so the next `show` builds a
+/// window rather than presenting a destroyed one.
+fn watch_close(manager: &Rc<Manager>) {
+    let gone = manager.window.clone();
+    manager.window.connect_close_request(move |_| {
+        OPEN.with(|open| open.borrow_mut().retain(|m| m.window != gone));
+        glib::Propagation::Proceed
     });
 }
 
@@ -1075,4 +1092,57 @@ mod tests {
 
     #[test]
     fn the_menu_labels_change_with_the_rule_state() {}
+
+    fn app(id: &str) -> adw::Application {
+        let app = adw::Application::builder()
+            .application_id(id)
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        // A window may only be added to a started application.
+        app.register(None::<&gtk::gio::Cancellable>)
+            .expect("the application registers");
+        app
+    }
+
+    #[test]
+    fn a_closed_window_is_no_longer_the_applications() {
+        if gtk::init().is_err() {
+            return;
+        }
+        let app = app("io.github.jeronimoalbi.Snitch.closed");
+        let window = adw::ApplicationWindow::new(&app);
+        assert!(window.application().is_some(), "an open window is its");
+        window.close();
+        assert!(
+            window.application().is_none(),
+            "a closed window is gone, and GTK emits no destroy signal to say so"
+        );
+    }
+
+    #[test]
+    fn a_reopen_after_a_close_shows_a_window() {
+        if gtk::init().is_err() {
+            return;
+        }
+        let app = app("io.github.jeronimoalbi.Snitch.reopen");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("a runtime to reach the daemon");
+        let updater = Updater::on(
+            std::sync::Arc::new(crate::link::Link::default()),
+            runtime.handle().clone(),
+        );
+
+        show(&app, updater.clone());
+        let closed = OPEN.with(|open| open.borrow().first().map(|m| m.window.clone()));
+        let closed = closed.expect("the first show opens a window");
+        closed.close();
+
+        show(&app, updater);
+        let again = OPEN.with(|open| open.borrow().first().map(|m| m.window.clone()));
+        let again = again.expect("the reopen registers a window");
+        assert_ne!(again, closed, "and it is not the closed one");
+        assert!(again.application().is_some(), "so it is a live window");
+        assert_eq!(OPEN.with(|open| open.borrow().len()), 1, "one window");
+    }
 }

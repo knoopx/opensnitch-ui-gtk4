@@ -680,13 +680,19 @@ pub fn open(
     deleted: Rc<dyn Fn(Rule)>,
 ) {
     let editor = Editor::new(app, parent, updater, existing, saved, deleted);
-    OPEN.with(|open| open.borrow_mut().push(editor.clone()));
 
+    // GTK stopped emitting `GtkWidget::destroy`, so the close is what retires
+    // the editor, and a window the application let go counts as already gone:
+    // presenting a closed window leaves it inconsistent, and it never returns.
     let gone = editor.window.clone();
-    editor.window.connect_destroy(move |_| {
-        OPEN.with(|open| {
-            open.borrow_mut().retain(|kept| kept.window != gone);
-        });
+    editor.window.connect_close_request(move |_| {
+        OPEN.with(|open| open.borrow_mut().retain(|kept| kept.window != gone));
+        glib::Propagation::Proceed
+    });
+    OPEN.with(|open| {
+        open.borrow_mut()
+            .retain(|kept| kept.window.application().is_some());
+        open.borrow_mut().push(editor.clone());
     });
     editor.window.present();
 }
