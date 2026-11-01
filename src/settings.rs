@@ -9,7 +9,6 @@ pub struct Settings {
     pub default_duration: usize,
     pub default_target: usize,
     pub timeout: u32,
-    pub popup_position: u32,
     pub advanced: bool,
     pub advanced_dstip: bool,
     pub advanced_dstport: bool,
@@ -25,7 +24,6 @@ impl Default for Settings {
             default_duration: 6,
             default_target: 0,
             timeout: 30,
-            popup_position: 0,
             advanced: false,
             advanced_dstip: false,
             advanced_dstport: false,
@@ -69,9 +67,6 @@ impl Settings {
             default_target: num("default_target", def.default_target).min(5),
             timeout: u32::try_from(num("default_timeout", def.timeout as usize))
                 .unwrap_or(def.timeout),
-            popup_position: u32::try_from(num("default_popup_position", 0))
-                .unwrap_or(0)
-                .min(4),
             advanced: flag("default_popup_advanced", false),
             advanced_dstip: flag("default_popup_advanced_dstip", false),
             advanced_dstport: flag("default_popup_advanced_dstport", false),
@@ -112,6 +107,8 @@ fn parse_ini(text: &str) -> HashMap<String, String> {
 mod tests {
     use super::*;
 
+    // A settings file written by the Qt UI: the keys this program ignores,
+    // the popup position among them, stay out of the way.
     const SAMPLE: &str = "[global]\ndefault_action=2\ndefault_duration=8\ndefault_target=0\n\
         default_timeout=30\ndefault_popup_position=1\ndefault_popup_advanced=true\n\
         server_address=unix:///tmp/osui.sock\n\n[promptDialog]\ngeometry=@ByteArray(\\x1)\n";
@@ -122,7 +119,6 @@ mod tests {
         assert_eq!(s.default_action, 2);
         assert_eq!(s.default_duration, 8);
         assert_eq!(s.timeout, 30);
-        assert_eq!(s.popup_position, 1);
         assert!(s.advanced);
         assert!(!s.advanced_uid);
         assert_eq!(s.server_address.as_deref(), Some("unix:///tmp/osui.sock"));

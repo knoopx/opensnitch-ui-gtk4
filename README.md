@@ -66,7 +66,7 @@ the system unit), and keep `PartOf` so the UI goes down with its session.
 ## Development
 
 ```sh
-nix develop                 # rust, gtk4, libadwaita, gtk4-layer-shell, protoc
+nix develop                 # rust, gtk4, libadwaita, protoc
 cargo build
 cargo test
 cargo clippy --all-targets -- -D warnings

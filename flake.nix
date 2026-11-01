@@ -17,11 +17,7 @@
       # Libraries the prompt links against, and the tools its build needs. The
       # package and the dev shell share these lists, so `cargo build` inside
       # `nix develop` sees exactly what the package build sees.
-      buildPackages = pkgs: [
-        pkgs.gtk4
-        pkgs.libadwaita
-        pkgs.gtk4-layer-shell
-      ];
+      buildPackages = pkgs: [pkgs.gtk4 pkgs.libadwaita];
       nativePackages = pkgs: [
         pkgs.pkg-config
         pkgs.protobuf

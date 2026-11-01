@@ -6,7 +6,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use adw::prelude::*;
 use gtk4 as gtk;
 use gtk4::prelude::*;
-use gtk4_layer_shell::{Edge, KeyboardMode, Layer, LayerShell};
 use libadwaita as adw;
 
 use crate::checksum::{self, Mismatch};
@@ -217,7 +216,7 @@ fn button_row(buttons: &[&gtk::Widget]) -> gtk::Box {
 }
 
 struct Dialog {
-    window: adw::Window,
+    window: adw::ApplicationWindow,
     stack: gtk::Stack,
     con: Connection,
     from: Vec<Target>,
@@ -298,11 +297,12 @@ impl Dialog {
         let deny_btn = adw::SplitButton::new();
         deny_btn.add_css_class("destructive-action");
 
-        let window = adw::Window::new();
+        // A plain window, not a layer surface: the compositor decorates it, so
+        // the prompt carries the same title bar, border and corners as any
+        // other window and can be moved out of the way.
+        let window = adw::ApplicationWindow::new(app);
         window.set_title(Some("OpenSnitch"));
         window.set_resizable(false);
-        place(&window, settings.popup_position);
-        window.set_application(Some(app));
 
         let stack = gtk::Stack::new();
         stack.set_vhomogeneous(false);
@@ -774,39 +774,6 @@ fn outcome_line(outcome: &Outcome) -> (&'static str, String) {
     }
 }
 
-fn layer_shell_usable() -> bool {
-    let on_wayland =
-        gtk::gdk::Display::default().is_some_and(|d| d.type_().name() == "GdkWaylandDisplay");
-    let on_gnome =
-        std::env::var("XDG_CURRENT_DESKTOP").is_ok_and(|d| d.split(':').any(|p| p == "GNOME"));
-    on_wayland && !on_gnome && gtk4_layer_shell::is_supported()
-}
-
-fn corner(position: u32) -> (Option<Edge>, Option<Edge>) {
-    match position {
-        1 => (Some(Edge::Top), Some(Edge::Right)),
-        2 => (Some(Edge::Bottom), Some(Edge::Right)),
-        3 => (Some(Edge::Top), Some(Edge::Left)),
-        4 => (Some(Edge::Bottom), Some(Edge::Left)),
-        _ => (None, None),
-    }
-}
-
-fn place(window: &adw::Window, position: u32) {
-    if !layer_shell_usable() {
-        return;
-    }
-    window.init_layer_shell();
-    window.set_layer(Layer::Overlay);
-    window.set_keyboard_mode(KeyboardMode::OnDemand);
-    window.set_namespace(Some("snitch"));
-    let (vertical, horizontal) = corner(position);
-    for edge in [vertical, horizontal].into_iter().flatten() {
-        window.set_anchor(edge, true);
-        window.set_margin(edge, 24);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -842,15 +809,5 @@ mod tests {
         let (class, text) = outcome_line(&updated(1, Some("daemon says no")));
         assert_eq!(class, "error");
         assert!(text.ends_with("daemon says no"), "{text}");
-    }
-
-    #[test]
-    fn the_position_maps_to_screen_edges() {
-        assert_eq!(corner(0), (None, None));
-        assert_eq!(corner(1), (Some(Edge::Top), Some(Edge::Right)));
-        assert_eq!(corner(2), (Some(Edge::Bottom), Some(Edge::Right)));
-        assert_eq!(corner(3), (Some(Edge::Top), Some(Edge::Left)));
-        assert_eq!(corner(4), (Some(Edge::Bottom), Some(Edge::Left)));
-        assert_eq!(corner(99), (None, None));
     }
 }
