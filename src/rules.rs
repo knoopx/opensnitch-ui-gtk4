@@ -51,7 +51,16 @@ const FILTERS: [&str; 3] = ["All applications", "Permanent", "Temporary"];
 
 const FILTER_HINT: &str = "Filter rules";
 
+const ACTIONS: [&str; 4] = ["All actions", "Allow", "Deny", "Reject"];
+
+const ACTION_HINT: &str = "Filter by action";
+
 const SEARCH_HINT: &str = "Search rules";
+
+/// The narrowest the search box gets: the two dropdowns share the left of the
+/// header bar with it, and it must keep its own when the window is at its
+/// narrowest.
+const SEARCH_MIN: i32 = 240;
 
 const DURATION_ALWAYS: &str = "always";
 
@@ -83,15 +92,57 @@ pub fn filter_of(combo: u32) -> Filter {
     }
 }
 
+/// The action combo: the second dropdown of the header bar, narrowing the rows
+/// to the rules that allow, deny or reject.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ByAction {
+    #[default]
+    All,
+    Allow,
+    Deny,
+    Reject,
+}
+
+impl ByAction {
+    pub fn of(combo: u32) -> Self {
+        match combo {
+            1 => Self::Allow,
+            2 => Self::Deny,
+            3 => Self::Reject,
+            _ => Self::All,
+        }
+    }
+
+    /// The name the daemon writes in the rule's action field, or `None` for
+    /// the combo's "All actions", which keeps every action.
+    fn action(self) -> Option<&'static str> {
+        match self {
+            Self::All => None,
+            Self::Allow => Some("allow"),
+            Self::Deny => Some("deny"),
+            Self::Reject => Some("reject"),
+        }
+    }
+
+    /// Does the rule answer the combo? The daemon spells the action in lower
+    /// case, a hand-written rule may not, so the names are compared loosely.
+    fn keeps(self, rule: &Rule) -> bool {
+        self.action()
+            .is_none_or(|name| rule.action.eq_ignore_ascii_case(name))
+    }
+}
+
 #[derive(Debug, Default)]
 struct Criteria {
     filter: Cell<Filter>,
+    action: Cell<ByAction>,
     query: RefCell<String>,
 }
 
 impl Criteria {
-    fn set(&self, filter: Filter, query: &str) {
+    fn set(&self, filter: Filter, action: ByAction, query: &str) {
         self.filter.set(filter);
+        self.action.set(action);
         *self.query.borrow_mut() = query.trim().to_string();
     }
 
@@ -102,6 +153,9 @@ impl Criteria {
             Filter::Permanent if !permanent => return false,
             Filter::Temporary if permanent => return false,
             Filter::Permanent | Filter::Temporary => {}
+        }
+        if !self.action.get().keeps(rule) {
+            return false;
         }
         view::rule_matches(rule, &self.query.borrow())
     }
@@ -389,6 +443,7 @@ struct Manager {
     menu: gtk::PopoverMenu,
     search: gtk::SearchEntry,
     filter: gtk::DropDown,
+    action_filter: gtk::DropDown,
     menu_rule: RefCell<Option<Rule>>,
     row_filter: rule_filter::RuleFilter,
     stack: gtk::Stack,
@@ -433,12 +488,14 @@ impl Manager {
 
         let filter = gtk::DropDown::from_strings(&FILTERS);
         filter.set_tooltip_text(Some(FILTER_HINT));
+        let action_filter = gtk::DropDown::from_strings(&ACTIONS);
+        action_filter.set_tooltip_text(Some(ACTION_HINT));
         let new_btn = gtk::Button::builder()
             .icon_name("list-add-symbolic")
             .tooltip_text("New Rule")
             .action_name("win.new-rule")
             .build();
-        let bar = header_bar(&filter, &search, &new_btn);
+        let bar = header_bar(&filter, &action_filter, &search, &new_btn);
         let toolbar = adw::ToolbarView::new();
         toolbar.add_top_bar(&bar);
         toolbar.set_content(Some(&toasts));
@@ -455,6 +512,7 @@ impl Manager {
             menu: gtk::PopoverMenu::from_model(Some(&menu_model())),
             search,
             filter,
+            action_filter,
             menu_rule: RefCell::new(None),
             row_filter: rule_filter.clone(),
             stack,
@@ -493,19 +551,28 @@ impl Manager {
 
     fn connect_filters(self: &Rc<Self>) {
         let d = self.clone();
-        let filter = self.filter.clone();
+        let (filter, action) = (self.filter.clone(), self.action_filter.clone());
         self.search.connect_search_changed(move |entry| {
-            d.apply(filter.selected(), &entry.text());
+            d.apply(filter.selected(), action.selected(), &entry.text());
         });
         let d = self.clone();
-        let search = self.search.clone();
+        let (search, action) = (self.search.clone(), self.action_filter.clone());
         self.filter.connect_selected_notify(move |drop| {
-            d.apply(drop.selected(), &search.text());
+            d.apply(drop.selected(), action.selected(), &search.text());
+        });
+        let d = self.clone();
+        let (search, filter) = (self.search.clone(), self.filter.clone());
+        self.action_filter.connect_selected_notify(move |drop| {
+            d.apply(filter.selected(), drop.selected(), &search.text());
         });
     }
 
-    fn apply(self: &Rc<Self>, combo: u32, query: &str) {
-        self.criteria.set(filter_of(combo), query);
+    /// Both dropdowns and the search text answer one question: which rows to
+    /// show. Every control re-reads the others, so the last touched one cannot
+    /// drop what the others asked for.
+    fn apply(self: &Rc<Self>, combo: u32, action: u32, query: &str) {
+        self.criteria
+            .set(filter_of(combo), ByAction::of(action), query);
         self.row_filter.answers_changed();
         self.set_status();
     }
@@ -707,15 +774,17 @@ impl Manager {
 
 fn header_bar(
     filter: &gtk::DropDown,
+    action: &gtk::DropDown,
     search: &gtk::SearchEntry,
     new_btn: &gtk::Button,
 ) -> adw::HeaderBar {
     let bar = adw::HeaderBar::new();
     bar.pack_start(new_btn);
     bar.pack_start(filter);
+    bar.pack_start(action);
 
-    search.set_halign(gtk::Align::Center);
-    search.set_width_request(300);
+    search.set_hexpand(true);
+    search.set_width_request(SEARCH_MIN);
     bar.set_title_widget(Some(search));
     bar
 }
@@ -736,6 +805,9 @@ fn empty_page() -> adw::StatusPage {
 fn no_match_page() -> adw::StatusPage {
     let page = adw::StatusPage::new();
     page.set_title("No Matching Rules");
+    page.set_description(Some(
+        "Widen the search, or set the two dropdowns back to all.",
+    ));
     page.set_icon_name(Some("system-search-symbolic"));
     page
 }
@@ -932,7 +1004,13 @@ mod tests {
 
     fn criteria(filter: Filter, query: &str) -> Criteria {
         let c = Criteria::default();
-        c.set(filter, query);
+        c.set(filter, ByAction::All, query);
+        c
+    }
+
+    fn actions(filter: Filter, action: ByAction) -> Criteria {
+        let c = Criteria::default();
+        c.set(filter, action, "");
         c
     }
 
@@ -1030,6 +1108,55 @@ mod tests {
     }
 
     #[test]
+    fn the_action_combo_keeps_one_action() {
+        let allow = rule("allow-curl", "allow", "always");
+        let deny = rule("deny-ssh", "deny", "1h");
+        let reject = rule("reject-x", "reject", "15m");
+        assert!(actions(Filter::All, ByAction::All).keeps(&deny));
+        assert!(actions(Filter::All, ByAction::Deny).keeps(&deny));
+        assert!(!actions(Filter::All, ByAction::Deny).keeps(&allow));
+        assert!(actions(Filter::All, ByAction::Allow).keeps(&allow));
+        assert!(!actions(Filter::All, ByAction::Allow).keeps(&reject));
+        assert!(actions(Filter::All, ByAction::Reject).keeps(&reject));
+        // A rule written by hand with the action in another case still counts.
+        let mut shouty = rule("shout", "ALLOW", "always");
+        assert!(actions(Filter::All, ByAction::Allow).keeps(&shouty));
+        shouty.action = "nonsense".into();
+        assert!(!actions(Filter::All, ByAction::Allow).keeps(&shouty));
+    }
+
+    #[test]
+    fn the_two_combos_and_the_search_answer_together() {
+        let allow_perm = rule("allow-always", "allow", "always");
+        let allow_temp = rule("allow-1h", "allow", "1h");
+        let deny_temp = rule("deny-1h", "deny", "1h");
+        assert!(actions(Filter::Temporary, ByAction::Allow).keeps(&allow_temp));
+        assert!(!actions(Filter::Temporary, ByAction::Allow).keeps(&deny_temp));
+        assert!(!actions(Filter::Temporary, ByAction::Allow).keeps(&allow_perm));
+        // The search text is honoured next to the actions, and an action narrows
+        // what the text alone matched.
+        assert!(criteria(Filter::All, "1h").keeps(&deny_temp));
+        let c = Criteria::default();
+        c.set(Filter::All, ByAction::Deny, "1h");
+        assert!(c.keeps(&deny_temp));
+        assert!(!c.keeps(&allow_temp));
+        c.set(Filter::All, ByAction::Allow, "no-such-rule");
+        assert!(!c.keeps(&allow_temp));
+    }
+
+    #[test]
+    fn the_action_combo_starts_with_every_action() {
+        assert_eq!(ByAction::of(0), ByAction::All);
+        assert_eq!(ByAction::of(1), ByAction::Allow);
+        assert_eq!(ByAction::of(2), ByAction::Deny);
+        assert_eq!(ByAction::of(3), ByAction::Reject);
+        assert_eq!(ByAction::of(9), ByAction::All);
+        // The combo's rows answer the same indexes.
+        assert_eq!(ACTIONS[0], "All actions");
+        assert_eq!(ACTIONS.len(), 4);
+    }
+
+    #[test]
     fn the_search_narrows_the_rows() {
         let curl = rule("allow-curl", "allow", "always");
         let mut ssh = rule("deny-ssh", "deny", "15m");
@@ -1057,10 +1184,13 @@ mod tests {
         store.append(&row_item::RuleRow::new(row(&rule("beta", "deny", "1h"))));
         let model = gtk::FilterListModel::new(Some(store), Some(filter.clone()));
         assert_eq!(model.n_items(), 2);
-        criteria.set(Filter::Permanent, "");
+        criteria.set(Filter::Permanent, ByAction::All, "");
         filter.answers_changed();
         assert_eq!(model.n_items(), 1, "only the permanent rule is left");
-        criteria.set(Filter::All, "beta");
+        criteria.set(Filter::All, ByAction::Deny, "");
+        filter.answers_changed();
+        assert_eq!(model.n_items(), 1, "and so does the action combo");
+        criteria.set(Filter::All, ByAction::All, "beta");
         filter.answers_changed();
         assert_eq!(model.n_items(), 1, "and the search text narrows it too");
     }
