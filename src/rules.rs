@@ -1239,7 +1239,7 @@ mod tests {
         if gtk::init().is_err() {
             return;
         }
-        let app = app("io.github.jeronimoalbi.Snitch.closed");
+        let app = app("net.knoopx.opensnitch.closed");
         let window = adw::ApplicationWindow::new(&app);
         assert!(window.application().is_some(), "an open window is its");
         window.close();
@@ -1254,7 +1254,7 @@ mod tests {
         if gtk::init().is_err() {
             return;
         }
-        let app = app("io.github.jeronimoalbi.Snitch.reopen");
+        let app = app("net.knoopx.opensnitch.reopen");
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .expect("a runtime to reach the daemon");

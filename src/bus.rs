@@ -7,16 +7,16 @@ use gtk4::glib::{self, Variant};
 
 use crate::link::{DaemonState, Interception, Updater};
 
-pub const NAME: &str = "io.github.jeronimoalbi.Snitch";
-const PATH: &str = "/io/github/jeronimoalbi/Snitch";
-const INTERFACE: &str = "io.github.jeronimoalbi.Snitch";
+pub const NAME: &str = "net.knoopx.opensnitch";
+const PATH: &str = "/net/knoopx/opensnitch";
+const INTERFACE: &str = "net.knoopx.opensnitch";
 const VERSION: u32 = 1;
-const POLKIT_ACTION: &str = "io.github.jeronimoalbi.Snitch.disable-interception";
+const POLKIT_ACTION: &str = "net.knoopx.opensnitch.disable-interception";
 const POLKIT_TIMEOUT_MS: i32 = 120_000;
 
 const XML: &str = r#"
 <node>
-  <interface name="io.github.jeronimoalbi.Snitch">
+  <interface name="net.knoopx.opensnitch">
     <property name="Version" type="u" access="read"/>
     <property name="Interception" type="s" access="read"/>
     <property name="Connected" type="b" access="read"/>

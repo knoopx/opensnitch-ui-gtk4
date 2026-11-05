@@ -29,7 +29,7 @@ pub mod proto {
     tonic::include_proto!("protocol");
 }
 
-const APP_ID: &str = "io.github.jeronimoalbi.Snitch";
+const APP_ID: &str = "net.knoopx.opensnitch";
 
 const USAGE: &str = "\
 opensnitch-ui-gtk4 - GTK4 UI for the OpenSnitch daemon
