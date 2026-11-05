@@ -6,6 +6,14 @@ rust-version = "1.92"
 description = "GTK4 UI for OpenSnitch"
 license = "MIT"
 
+# `cli/` is the companion command line program: a peer of opensnitchd itself, with
+# no GTK in its tree, so `cargo build -p opensnitch-cli` never pulls gtk4 or
+# libadwaita. The workspace shares one Cargo.lock and the `[patch]` below, which
+# the CLI needs for the same reason this program does.
+[workspace]
+members = ["cli"]
+resolver = "3"
+
 [dependencies]
 async-channel = "2.5.0"
 gtk4 = "0.11.5"
