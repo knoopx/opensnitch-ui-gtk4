@@ -881,7 +881,13 @@ fn setup_cell(object: &glib::Object, idx: usize, manager: Weak<Manager>) {
         return;
     }
     let cell = gtk::Label::new(None);
-    cell.set_ellipsize(gtk::pango::EllipsizeMode::End);
+    // Wide columns hold long identifiers (rule names, nix store paths) whose
+    // distinguishing parts sit in the middle, so trim there instead of the tail.
+    cell.set_ellipsize(if EXPANDING.contains(&idx) {
+        gtk::pango::EllipsizeMode::Middle
+    } else {
+        gtk::pango::EllipsizeMode::End
+    });
     cell.set_max_width_chars(if EXPANDING.contains(&idx) {
         WIDE
     } else {
