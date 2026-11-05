@@ -622,10 +622,24 @@ impl Dialog {
         self.deny_btn
             .connect_clicked(move |_| d.send_rule(d.deny_action()));
 
-        for row in [&self.from_dd, &self.ip_dd, &self.duration_dd] {
-            let d = self.clone();
-            row.connect_selected_notify(move |_| d.stop_countdown());
+        // A choice made in a dropdown is a choice about the rule, so it turns on
+        // the clause it belongs to: picking "Applies to" writes the process
+        // clause, picking a destination IP writes the destination clause. The
+        // duration has no clause of its own, it only lengthens the rule.
+        for (row, check) in [
+            (&self.from_dd, &self.check_from),
+            (&self.ip_dd, &self.check_ip),
+        ] {
+            let (d, check) = (self.clone(), check.clone());
+            row.connect_selected_notify(move |_| {
+                d.stop_countdown();
+                check.set_active(true);
+                d.update_guards();
+            });
         }
+        let d = self.clone();
+        self.duration_dd
+            .connect_selected_notify(move |_| d.stop_countdown());
         for check in [
             &self.check_from,
             &self.check_ip,
