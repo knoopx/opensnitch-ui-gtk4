@@ -1240,6 +1240,18 @@ mod tests {
         app
     }
 
+    /// Let the main context run what GTK queued: `gtk_window_destroy` does not
+    /// tear the window down on the spot, it queues an idle, so a closed window
+    /// leaves the application on that idle rather than on the `close` call.
+    fn run_pending() {
+        let context = glib::MainContext::default();
+        for _ in 0..100 {
+            if !context.iteration(false) {
+                break;
+            }
+        }
+    }
+
     #[test]
     fn a_closed_window_is_no_longer_the_applications() {
         if gtk::init().is_err() {
@@ -1247,8 +1259,13 @@ mod tests {
         }
         let app = app("net.knoopx.opensnitch.closed");
         let window = adw::ApplicationWindow::new(&app);
+        // `show` presents the window, and GTK only lets go of a window that got
+        // a surface: closing an unrealized one queues its destruction on an
+        // idle, so the application keeps it for as long as nothing runs here.
+        window.present();
         assert!(window.application().is_some(), "an open window is its");
         window.close();
+        run_pending();
         assert!(
             window.application().is_none(),
             "a closed window is gone, and GTK emits no destroy signal to say so"
